@@ -6,7 +6,7 @@ class Notifier:
         self.token = token
         self.chat_id = chat_id
 
-    async def send(self, signal):
+    def send(self, signal):
         message = (
             "🚨 XAUUSD APA SIGNAL 🚨\n\n"
             f"📊 Direction: {signal['side']}\n"
