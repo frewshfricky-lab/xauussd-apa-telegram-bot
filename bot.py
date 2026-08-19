@@ -19,11 +19,12 @@ def main():
 
     try:
         h4 = get_bars(SYMBOL, "4h")
-        h1 = get_bars(SYMBOL, "1h")
-        m15 = get_bars(SYMBOL, "15min")
+h1 = get_bars(SYMBOL, "1h")
+m15 = get_bars(SYMBOL, "15min")
 
-        signal = analyze(h4, h1, m15)
+print("DATA CHECK:", len(h4), len(h1), len(m15))
 
+signal = analyze(h4, h1, m15)
         if signal:
             notifier.send(signal)
             print("SIGNAL SENT:", signal)
