@@ -1,5 +1,5 @@
 {
-  "status": "ACTIVE",
+  "status": "SL_HIT",
   "fingerprint": "SELL|4476.67|4500.23|4405.97",
   "side": "SELL",
   "entry": 4476.67,
@@ -7,5 +7,6 @@
   "tp": 4405.97,
   "rr": 3.0,
   "bias": "H4 NEUTRAL / H1 BEARISH",
-  "reason": "SWING HIGH liquidity sweep + M15 CHoCH/BOS confirmation"
+  "reason": "SWING HIGH liquidity sweep + M15 CHoCH/BOS confirmation",
+  "closed_price": 4517.36567
 }
