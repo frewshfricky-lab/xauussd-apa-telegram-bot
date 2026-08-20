@@ -2,26 +2,26 @@ import pandas as pd
 
 
 # ============================================================
-# APA ENGINE — H4 NEUTRAL / H1 DIRECTION VERSION
+# APA ENGINE — ADVANCED LIQUIDITY DETECTION
 #
-# ANALYSIS
-#   H4 primary bias
-#   H1 directional confirmation
+# H4 = PRIMARY BIAS
+# H1 = DIRECTION / FILTER
+# M15 = LIQUIDITY + STRUCTURE + ENTRY
 #
-# POI / LIQUIDITY
-#   M15 liquidity sweep
+# APA FLOW:
+# ANALYSIS → POI → LIQUIDITY SWEEP → CHoCH/BOS → ENTRY
 #
-# ACTION
-#   M15 CHoCH / BOS confirmation
-#
-# RISK
-#   Minimum RR = 1:3
+# MINIMUM RISK / REWARD = 1:3
 # ============================================================
 
 
 SWING_LOOKBACK = 3
-LIQUIDITY_LOOKBACK = 20
+LIQUIDITY_LOOKBACK = 40
 MIN_RR = 3.0
+
+# How close two highs/lows must be to be considered
+# approximately equal liquidity.
+EQUAL_LEVEL_TOLERANCE = 0.0015
 
 
 def _prepare(df):
@@ -32,6 +32,7 @@ def _prepare(df):
     required = ["open", "high", "low", "close"]
 
     for column in required:
+
         if column not in data.columns:
             raise ValueError(
                 f"Missing required column: {column}"
@@ -76,6 +77,7 @@ def _swing_highs(df):
     """Find confirmed swing highs."""
 
     highs = df["high"]
+
     result = []
 
     for i in range(
@@ -97,6 +99,7 @@ def _swing_highs(df):
             value > left.max()
             and value >= right.max()
         ):
+
             result.append(
                 (i, float(value))
             )
@@ -108,6 +111,7 @@ def _swing_lows(df):
     """Find confirmed swing lows."""
 
     lows = df["low"]
+
     result = []
 
     for i in range(
@@ -129,6 +133,7 @@ def _swing_lows(df):
             value < left.min()
             and value <= right.min()
         ):
+
             result.append(
                 (i, float(value))
             )
@@ -138,7 +143,7 @@ def _swing_lows(df):
 
 def _structure_bias(df):
     """
-    Determine structure.
+    Determine market structure.
 
     bullish:
         Higher High + Higher Low
@@ -179,36 +184,19 @@ def _structure_bias(df):
 
 def _select_direction(h4_bias, h1_bias):
     """
-    Determine trading direction.
+    Select trading direction.
 
-    RULES:
+    H4/H1 aligned:
+        Follow direction.
 
-    H4 bullish + H1 bullish
-        -> BUY
+    H4 neutral:
+        Allow H1 direction.
 
-    H4 bearish + H1 bearish
-        -> SELL
+    H1 neutral:
+        Allow H4 direction.
 
-    H4 neutral + H1 bullish
-        -> BUY
-
-    H4 neutral + H1 bearish
-        -> SELL
-
-    H4 bullish + H1 neutral
-        -> BUY
-
-    H4 bearish + H1 neutral
-        -> SELL
-
-    H4 bullish + H1 bearish
-        -> NO TRADE
-
-    H4 bearish + H1 bullish
-        -> NO TRADE
-
-    Both neutral
-        -> NO TRADE
+    H4 and H1 opposite:
+        Reject trade.
     """
 
     if (
@@ -241,19 +229,103 @@ def _select_direction(h4_bias, h1_bias):
     ):
         return "sell"
 
-    if (
-        h4_bias == "bullish"
-        and h1_bias == "neutral"
-    ):
-        return "buy"
-
-    if (
-        h4_bias == "bearish"
-        and h1_bias == "neutral"
-    ):
-        return "sell"
-
     return None
+
+
+def _equal_high_groups(
+    swing_highs
+):
+    """
+    Find groups of approximately equal highs.
+
+    Equal highs can represent buy-side liquidity.
+    """
+
+    groups = []
+
+    for i in range(
+        len(swing_highs)
+    ):
+
+        index_a, level_a = swing_highs[i]
+
+        group = [
+            (index_a, level_a)
+        ]
+
+        for j in range(
+            i + 1,
+            len(swing_highs)
+        ):
+
+            index_b, level_b = (
+                swing_highs[j]
+            )
+
+            difference = abs(
+                level_b - level_a
+            ) / max(
+                abs(level_a),
+                0.00001
+            )
+
+            if difference <= EQUAL_LEVEL_TOLERANCE:
+                group.append(
+                    (index_b, level_b)
+                )
+
+        if len(group) >= 2:
+            groups.append(group)
+
+    return groups
+
+
+def _equal_low_groups(
+    swing_lows
+):
+    """
+    Find groups of approximately equal lows.
+
+    Equal lows can represent sell-side liquidity.
+    """
+
+    groups = []
+
+    for i in range(
+        len(swing_lows)
+    ):
+
+        index_a, level_a = swing_lows[i]
+
+        group = [
+            (index_a, level_a)
+        ]
+
+        for j in range(
+            i + 1,
+            len(swing_lows)
+        ):
+
+            index_b, level_b = (
+                swing_lows[j]
+            )
+
+            difference = abs(
+                level_b - level_a
+            ) / max(
+                abs(level_a),
+                0.00001
+            )
+
+            if difference <= EQUAL_LEVEL_TOLERANCE:
+                group.append(
+                    (index_b, level_b)
+                )
+
+        if len(group) >= 2:
+            groups.append(group)
+
+    return groups
 
 
 def _find_liquidity_sweep(
@@ -261,15 +333,21 @@ def _find_liquidity_sweep(
     direction
 ):
     """
-    Find a recent liquidity sweep.
+    Advanced liquidity sweep detector.
 
     BUY:
-        price takes a previous swing low
-        and closes back above it.
+        Looks for sell-side liquidity:
+        - previous swing lows
+        - equal lows
+        - price trades below liquidity
+        - candle closes back above liquidity
 
     SELL:
-        price takes a previous swing high
-        and closes back below it.
+        Looks for buy-side liquidity:
+        - previous swing highs
+        - equal highs
+        - price trades above liquidity
+        - candle closes back below liquidity
     """
 
     swing_highs = _swing_highs(df)
@@ -280,80 +358,187 @@ def _find_liquidity_sweep(
         len(df) - LIQUIDITY_LOOKBACK
     )
 
+    candidates = []
+
+    # --------------------------------------------------------
+    # BUY-SIDE SETUP
+    # --------------------------------------------------------
+
     if direction == "buy":
 
-        candidates = [
-            item
-            for item in swing_lows
-            if item[0] < len(df) - 1
-        ]
+        # Normal swing-low liquidity
+        for index, level in swing_lows:
 
-        for index, level in reversed(
-            candidates
-        ):
+            if index >= start:
+                candidates.append(
+                    (
+                        index,
+                        float(level),
+                        "SWING LOW"
+                    )
+                )
 
-            if index < start:
+        # Equal-low liquidity
+        groups = _equal_low_groups(
+            swing_lows
+        )
+
+        for group in groups:
+
+            latest_index, latest_level = (
+                group[-1]
+            )
+
+            if latest_index >= start:
+
+                average_level = sum(
+                    item[1]
+                    for item in group
+                ) / len(group)
+
+                candidates.append(
+                    (
+                        latest_index,
+                        float(average_level),
+                        "EQUAL LOWS"
+                    )
+                )
+
+        # Check newest liquidity first
+        candidates.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        for (
+            liquidity_index,
+            liquidity_level,
+            liquidity_type
+        ) in candidates:
+
+            if (
+                liquidity_index
+                >= len(df) - 1
+            ):
                 continue
 
             for candle in range(
-                index + 1,
+                liquidity_index + 1,
                 len(df)
             ):
 
-                low = float(
+                candle_low = float(
                     df["low"].iloc[candle]
                 )
 
-                close = float(
+                candle_close = float(
                     df["close"].iloc[candle]
                 )
 
+                # Liquidity taken and price
+                # closes back above it.
                 if (
-                    low < level
-                    and close > level
+                    candle_low
+                    < liquidity_level
+                    and candle_close
+                    > liquidity_level
                 ):
+
                     return {
                         "index": candle,
-                        "level": level,
-                        "extreme": low,
+                        "level": liquidity_level,
+                        "extreme": candle_low,
+                        "type": liquidity_type,
                     }
+
+    # --------------------------------------------------------
+    # SELL-SIDE SETUP
+    # --------------------------------------------------------
 
     if direction == "sell":
 
-        candidates = [
-            item
-            for item in swing_highs
-            if item[0] < len(df) - 1
-        ]
+        # Normal swing-high liquidity
+        for index, level in swing_highs:
 
-        for index, level in reversed(
-            candidates
-        ):
+            if index >= start:
+                candidates.append(
+                    (
+                        index,
+                        float(level),
+                        "SWING HIGH"
+                    )
+                )
 
-            if index < start:
+        # Equal-high liquidity
+        groups = _equal_high_groups(
+            swing_highs
+        )
+
+        for group in groups:
+
+            latest_index, latest_level = (
+                group[-1]
+            )
+
+            if latest_index >= start:
+
+                average_level = sum(
+                    item[1]
+                    for item in group
+                ) / len(group)
+
+                candidates.append(
+                    (
+                        latest_index,
+                        float(average_level),
+                        "EQUAL HIGHS"
+                    )
+                )
+
+        candidates.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        for (
+            liquidity_index,
+            liquidity_level,
+            liquidity_type
+        ) in candidates:
+
+            if (
+                liquidity_index
+                >= len(df) - 1
+            ):
                 continue
 
             for candle in range(
-                index + 1,
+                liquidity_index + 1,
                 len(df)
             ):
 
-                high = float(
+                candle_high = float(
                     df["high"].iloc[candle]
                 )
 
-                close = float(
+                candle_close = float(
                     df["close"].iloc[candle]
                 )
 
+                # Liquidity taken and price
+                # closes back below it.
                 if (
-                    high > level
-                    and close < level
+                    candle_high
+                    > liquidity_level
+                    and candle_close
+                    < liquidity_level
                 ):
+
                     return {
                         "index": candle,
-                        "level": level,
-                        "extreme": high,
+                        "level": liquidity_level,
+                        "extreme": candle_high,
+                        "type": liquidity_type,
                     }
 
     return None
@@ -365,8 +550,13 @@ def _find_choch_bos(
     direction
 ):
     """
-    Find structural confirmation
-    after the liquidity sweep.
+    Confirm structural shift after liquidity sweep.
+
+    BUY:
+        Close above a relevant swing high.
+
+    SELL:
+        Close below a relevant swing low.
     """
 
     sweep_index = sweep["index"]
@@ -376,6 +566,10 @@ def _find_choch_bos(
 
     swing_highs = _swing_highs(df)
     swing_lows = _swing_lows(df)
+
+    # --------------------------------------------------------
+    # BUY STRUCTURAL CONFIRMATION
+    # --------------------------------------------------------
 
     if direction == "buy":
 
@@ -402,11 +596,16 @@ def _find_choch_bos(
             )
 
             if close > structure_level:
+
                 return {
                     "index": i,
                     "level": structure_level,
                     "type": "BOS/CHoCH",
                 }
+
+    # --------------------------------------------------------
+    # SELL STRUCTURAL CONFIRMATION
+    # --------------------------------------------------------
 
     if direction == "sell":
 
@@ -433,6 +632,7 @@ def _find_choch_bos(
             )
 
             if close < structure_level:
+
                 return {
                     "index": i,
                     "level": structure_level,
@@ -449,8 +649,13 @@ def _build_trade(
     confirmation
 ):
     """
-    Build trade with SL beyond sweep
-    and minimum 1:3 RR.
+    Build entry, SL and TP.
+
+    SL:
+        Beyond liquidity sweep.
+
+    TP:
+        Minimum 3R.
     """
 
     entry = float(
@@ -468,7 +673,9 @@ def _build_trade(
     if pd.isna(atr_value):
         atr_value = entry * 0.001
 
-    atr_value = float(atr_value)
+    atr_value = float(
+        atr_value
+    )
 
     buffer = atr_value * 0.15
 
@@ -517,28 +724,38 @@ def _build_trade(
 
     return {
         "side": direction.upper(),
-        "entry": round(entry, 2),
-        "sl": round(sl, 2),
-        "tp": round(tp, 2),
-        "rr": round(rr, 2),
+        "entry": round(
+            entry,
+            2
+        ),
+        "sl": round(
+            sl,
+            2
+        ),
+        "tp": round(
+            tp,
+            2
+        ),
+        "rr": round(
+            rr,
+            2
+        ),
     }
 
 
 def analyze(h4, h1, m15):
     """
-    Main APA engine.
+    Main APA analysis.
 
-    H4:
-        Primary market structure.
+    Required:
 
-    H1:
-        Directional confirmation.
+    1. H4/H1 directional framework
+    2. M15 liquidity sweep
+    3. M15 CHoCH/BOS
+    4. Minimum 1:3 RR
 
-    M15:
-        Liquidity sweep and CHoCH/BOS.
-
-    Risk:
-        Minimum 1:3 RR.
+    No Telegram signal is returned unless
+    every required condition passes.
     """
 
     h4 = _prepare(h4)
@@ -546,7 +763,7 @@ def analyze(h4, h1, m15):
     m15 = _prepare(m15)
 
     print("================================")
-    print("APA ENGINE CHECK")
+    print("ADVANCED APA ENGINE CHECK")
     print("================================")
 
     print(
@@ -577,7 +794,7 @@ def analyze(h4, h1, m15):
         return None
 
     # --------------------------------------------------------
-    # HIGHER-TIMEFRAME ANALYSIS
+    # 1. ANALYSIS
     # --------------------------------------------------------
 
     h4_bias = _structure_bias(h4)
@@ -594,7 +811,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # DIRECTION SELECTION
+    # 2. SELECT DIRECTION
     # --------------------------------------------------------
 
     direction = _select_direction(
@@ -609,7 +826,8 @@ def analyze(h4, h1, m15):
         )
 
         print(
-            "REASON: H4/H1 CONFLICT OR BOTH NEUTRAL"
+            "REASON: TIMEFRAME CONFLICT "
+            "OR NO DIRECTION"
         )
 
         print(
@@ -629,11 +847,11 @@ def analyze(h4, h1, m15):
     ):
 
         print(
-            "H4 STATUS: NEUTRAL"
+            "H4 NEUTRAL:"
         )
 
         print(
-            "H1 STATUS: DIRECTION USED"
+            "USING H1 DIRECTION"
         )
 
     elif (
@@ -642,21 +860,21 @@ def analyze(h4, h1, m15):
     ):
 
         print(
-            "H1 STATUS: NEUTRAL"
+            "H1 NEUTRAL:"
         )
 
         print(
-            "H4 STATUS: PRIMARY DIRECTION USED"
+            "USING H4 DIRECTION"
         )
 
     else:
 
         print(
-            "HTF STATUS: ALIGNED"
+            "HTF DIRECTION ALIGNED"
         )
 
     # --------------------------------------------------------
-    # LIQUIDITY SWEEP
+    # 3. LIQUIDITY / POI
     # --------------------------------------------------------
 
     sweep = _find_liquidity_sweep(
@@ -667,7 +885,13 @@ def analyze(h4, h1, m15):
     if not sweep:
 
         print(
-            "M15 LIQUIDITY SWEEP: NOT FOUND"
+            "M15 LIQUIDITY: NOT FOUND"
+        )
+
+        print(
+            "LOOKBACK:",
+            LIQUIDITY_LOOKBACK,
+            "CANDLES"
         )
 
         print(
@@ -677,11 +901,16 @@ def analyze(h4, h1, m15):
         return None
 
     print(
-        "M15 LIQUIDITY SWEEP: FOUND"
+        "M15 LIQUIDITY: FOUND"
     )
 
     print(
-        "Sweep level:",
+        "LIQUIDITY TYPE:",
+        sweep["type"]
+    )
+
+    print(
+        "LIQUIDITY LEVEL:",
         round(
             sweep["level"],
             2
@@ -689,7 +918,7 @@ def analyze(h4, h1, m15):
     )
 
     print(
-        "Sweep extreme:",
+        "SWEEP EXTREME:",
         round(
             sweep["extreme"],
             2
@@ -697,7 +926,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # CHoCH / BOS
+    # 4. CHoCH / BOS
     # --------------------------------------------------------
 
     confirmation = _find_choch_bos(
@@ -723,7 +952,7 @@ def analyze(h4, h1, m15):
     )
 
     print(
-        "Structure level:",
+        "STRUCTURE LEVEL:",
         round(
             confirmation["level"],
             2
@@ -731,7 +960,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # TRADE CONSTRUCTION
+    # 5. RISK MANAGEMENT
     # --------------------------------------------------------
 
     trade = _build_trade(
@@ -745,6 +974,11 @@ def analyze(h4, h1, m15):
 
         print(
             "RISK/REWARD: FAILED"
+        )
+
+        print(
+            "MINIMUM REQUIRED RR:",
+            MIN_RR
         )
 
         print(
@@ -774,7 +1008,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # FINAL SIGNAL
+    # 6. FINAL APA SIGNAL
     # --------------------------------------------------------
 
     trade["bias"] = (
@@ -783,8 +1017,8 @@ def analyze(h4, h1, m15):
     )
 
     trade["reason"] = (
-        "M15 liquidity sweep + "
-        "CHoCH/BOS confirmation"
+        f"{sweep['type']} liquidity sweep + "
+        "M15 CHoCH/BOS confirmation"
     )
 
     print("================================")
