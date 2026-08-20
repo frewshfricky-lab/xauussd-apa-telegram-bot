@@ -2,23 +2,20 @@ import pandas as pd
 
 
 # ============================================================
-# APA ENGINE — DIAGNOSTIC VERSION
+# APA ENGINE — H4 NEUTRAL / H1 DIRECTION VERSION
 #
-# Analysis
-#   ↓
-# H4 Bias
-#   ↓
-# H1 Confirmation
-#   ↓
-# M15 Liquidity Sweep
-#   ↓
-# M15 CHoCH / BOS
-#   ↓
-# Entry
-#   ↓
-# SL
-#   ↓
-# TP >= 1:3
+# ANALYSIS
+#   H4 primary bias
+#   H1 directional confirmation
+#
+# POI / LIQUIDITY
+#   M15 liquidity sweep
+#
+# ACTION
+#   M15 CHoCH / BOS confirmation
+#
+# RISK
+#   Minimum RR = 1:3
 # ============================================================
 
 
@@ -53,7 +50,7 @@ def _prepare(df):
 
 
 def _atr(df, period=14):
-    """Calculate Average True Range."""
+    """Calculate ATR."""
 
     high = df["high"]
     low = df["low"]
@@ -70,14 +67,15 @@ def _atr(df, period=14):
         axis=1,
     ).max(axis=1)
 
-    return true_range.rolling(period).mean()
+    return true_range.rolling(
+        period
+    ).mean()
 
 
 def _swing_highs(df):
     """Find confirmed swing highs."""
 
     highs = df["high"]
-
     result = []
 
     for i in range(
@@ -110,7 +108,6 @@ def _swing_lows(df):
     """Find confirmed swing lows."""
 
     lows = df["low"]
-
     result = []
 
     for i in range(
@@ -141,16 +138,16 @@ def _swing_lows(df):
 
 def _structure_bias(df):
     """
-    Determine market structure.
+    Determine structure.
 
-    Bullish:
+    bullish:
         Higher High + Higher Low
 
-    Bearish:
+    bearish:
         Lower High + Lower Low
 
-    Otherwise:
-        Neutral
+    neutral:
+        Mixed / unclear structure
     """
 
     highs = _swing_highs(df)
@@ -180,16 +177,98 @@ def _structure_bias(df):
     return "neutral"
 
 
-def _find_liquidity_sweep(df, direction):
+def _select_direction(h4_bias, h1_bias):
     """
-    Detect liquidity sweep.
+    Determine trading direction.
+
+    RULES:
+
+    H4 bullish + H1 bullish
+        -> BUY
+
+    H4 bearish + H1 bearish
+        -> SELL
+
+    H4 neutral + H1 bullish
+        -> BUY
+
+    H4 neutral + H1 bearish
+        -> SELL
+
+    H4 bullish + H1 neutral
+        -> BUY
+
+    H4 bearish + H1 neutral
+        -> SELL
+
+    H4 bullish + H1 bearish
+        -> NO TRADE
+
+    H4 bearish + H1 bullish
+        -> NO TRADE
+
+    Both neutral
+        -> NO TRADE
+    """
+
+    if (
+        h4_bias == "bullish"
+        and h1_bias == "bearish"
+    ):
+        return None
+
+    if (
+        h4_bias == "bearish"
+        and h1_bias == "bullish"
+    ):
+        return None
+
+    if h4_bias == "bullish":
+        return "buy"
+
+    if h4_bias == "bearish":
+        return "sell"
+
+    if (
+        h4_bias == "neutral"
+        and h1_bias == "bullish"
+    ):
+        return "buy"
+
+    if (
+        h4_bias == "neutral"
+        and h1_bias == "bearish"
+    ):
+        return "sell"
+
+    if (
+        h4_bias == "bullish"
+        and h1_bias == "neutral"
+    ):
+        return "buy"
+
+    if (
+        h4_bias == "bearish"
+        and h1_bias == "neutral"
+    ):
+        return "sell"
+
+    return None
+
+
+def _find_liquidity_sweep(
+    df,
+    direction
+):
+    """
+    Find a recent liquidity sweep.
 
     BUY:
-        Price takes a previous swing low
+        price takes a previous swing low
         and closes back above it.
 
     SELL:
-        Price takes a previous swing high
+        price takes a previous swing high
         and closes back below it.
     """
 
@@ -239,7 +318,7 @@ def _find_liquidity_sweep(df, direction):
                         "extreme": low,
                     }
 
-    elif direction == "sell":
+    if direction == "sell":
 
         candidates = [
             item
@@ -323,14 +402,13 @@ def _find_choch_bos(
             )
 
             if close > structure_level:
-
                 return {
                     "index": i,
                     "level": structure_level,
                     "type": "BOS/CHoCH",
                 }
 
-    elif direction == "sell":
+    if direction == "sell":
 
         previous_lows = [
             item
@@ -355,7 +433,6 @@ def _find_choch_bos(
             )
 
             if close < structure_level:
-
                 return {
                     "index": i,
                     "level": structure_level,
@@ -371,7 +448,10 @@ def _build_trade(
     sweep,
     confirmation
 ):
-    """Build entry, stop-loss and take-profit."""
+    """
+    Build trade with SL beyond sweep
+    and minimum 1:3 RR.
+    """
 
     entry = float(
         df["close"].iloc[
@@ -379,9 +459,9 @@ def _build_trade(
         ]
     )
 
-    atr_series = _atr(df)
+    atr_values = _atr(df)
 
-    atr_value = atr_series.iloc[
+    atr_value = atr_values.iloc[
         confirmation["index"]
     ]
 
@@ -446,13 +526,19 @@ def _build_trade(
 
 def analyze(h4, h1, m15):
     """
-    Main diagnostic APA analysis.
+    Main APA engine.
 
-    The diagnostic information is printed to the
-    GitHub Actions log.
+    H4:
+        Primary market structure.
 
-    A Telegram signal is returned only when ALL
-    required APA conditions are satisfied.
+    H1:
+        Directional confirmation.
+
+    M15:
+        Liquidity sweep and CHoCH/BOS.
+
+    Risk:
+        Minimum 1:3 RR.
     """
 
     h4 = _prepare(h4)
@@ -460,7 +546,7 @@ def analyze(h4, h1, m15):
     m15 = _prepare(m15)
 
     print("================================")
-    print("APA DIAGNOSTIC CHECK")
+    print("APA ENGINE CHECK")
     print("================================")
 
     print(
@@ -491,7 +577,7 @@ def analyze(h4, h1, m15):
         return None
 
     # --------------------------------------------------------
-    # 1. HIGHER TIMEFRAME ANALYSIS
+    # HIGHER-TIMEFRAME ANALYSIS
     # --------------------------------------------------------
 
     h4_bias = _structure_bias(h4)
@@ -508,35 +594,22 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # 2. H4/H1 AGREEMENT
+    # DIRECTION SELECTION
     # --------------------------------------------------------
 
-    if (
-        h4_bias == "bullish"
-        and h1_bias == "bullish"
-    ):
+    direction = _select_direction(
+        h4_bias,
+        h1_bias
+    )
 
-        direction = "buy"
+    if direction is None:
 
         print(
-            "HTF ALIGNMENT: BULLISH"
+            "HTF DIRECTION: REJECTED"
         )
 
-    elif (
-        h4_bias == "bearish"
-        and h1_bias == "bearish"
-    ):
-
-        direction = "sell"
-
         print(
-            "HTF ALIGNMENT: BEARISH"
-        )
-
-    else:
-
-        print(
-            "HTF ALIGNMENT: FAILED"
+            "REASON: H4/H1 CONFLICT OR BOTH NEUTRAL"
         )
 
         print(
@@ -545,8 +618,45 @@ def analyze(h4, h1, m15):
 
         return None
 
+    print(
+        "HTF DIRECTION:",
+        direction.upper()
+    )
+
+    if (
+        h4_bias == "neutral"
+        and h1_bias != "neutral"
+    ):
+
+        print(
+            "H4 STATUS: NEUTRAL"
+        )
+
+        print(
+            "H1 STATUS: DIRECTION USED"
+        )
+
+    elif (
+        h4_bias != "neutral"
+        and h1_bias == "neutral"
+    ):
+
+        print(
+            "H1 STATUS: NEUTRAL"
+        )
+
+        print(
+            "H4 STATUS: PRIMARY DIRECTION USED"
+        )
+
+    else:
+
+        print(
+            "HTF STATUS: ALIGNED"
+        )
+
     # --------------------------------------------------------
-    # 3. LIQUIDITY SWEEP
+    # LIQUIDITY SWEEP
     # --------------------------------------------------------
 
     sweep = _find_liquidity_sweep(
@@ -587,7 +697,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # 4. CHoCH / BOS
+    # CHoCH / BOS
     # --------------------------------------------------------
 
     confirmation = _find_choch_bos(
@@ -621,7 +731,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # 5. TRADE CONSTRUCTION
+    # TRADE CONSTRUCTION
     # --------------------------------------------------------
 
     trade = _build_trade(
@@ -664,7 +774,7 @@ def analyze(h4, h1, m15):
     )
 
     # --------------------------------------------------------
-    # 6. FINAL SIGNAL
+    # FINAL SIGNAL
     # --------------------------------------------------------
 
     trade["bias"] = (
@@ -673,20 +783,12 @@ def analyze(h4, h1, m15):
     )
 
     trade["reason"] = (
-        "Liquidity sweep + "
-        "M15 BOS/CHoCH confirmation"
+        "M15 liquidity sweep + "
+        "CHoCH/BOS confirmation"
     )
 
-    print(
-        "================================"
-    )
-
-    print(
-        "RESULT: VALID APA SETUP"
-    )
-
-    print(
-        "================================"
-    )
+    print("================================")
+    print("RESULT: VALID APA SETUP")
+    print("================================")
 
     return trade
