@@ -24,8 +24,17 @@ def main():
 
         print("DATA CHECK:", len(h4), len(h1), len(m15))
 
-        signal = analyze(h4, h1, m15)
+notifier.send({
+    "side": "TEST",
+    "entry": 0,
+    "sl": 0,
+    "tp": 0,
+    "rr": "TEST",
+    "bias": "Telegram connection",
+    "reason": "Cloud bot connection test"
+})
 
+signal = analyze(h4, h1, m15)
         if signal:
             notifier.send(signal)
             print("SIGNAL SENT:", signal)
