@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import requests
 import pandas as pd
 
@@ -8,70 +9,48 @@ from apa_engine import analyze
 
 # ============================================================
 # CLOUD XAUUSD APA BOT
-# DUPLICATE SIGNAL PROTECTION
-#
-# The bot:
-# 1. Downloads XAUUSD data
-# 2. Runs APA analysis
-# 3. Creates a unique fingerprint for every setup
-# 4. Saves the active setup to GitHub
-# 5. Prevents duplicate Telegram signals
-# 6. Tracks SL / TP
-# 7. Waits for a NEW setup after the old one closes
+# SIGNAL STATE + DUPLICATE PROTECTION
 # ============================================================
 
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-TWELVE_DATA_API_KEY = os.getenv(
-    "TWELVE_DATA_API_KEY"
-)
-
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN"
-)
-
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID"
-)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
 SYMBOL = "XAU/USD"
 
 STATE_FILE = "signal_state.json"
 
-TWELVE_DATA_URL = (
-    "https://api.twelvedata.com/time_series"
-)
-
-GITHUB_API_BASE = (
-    "https://api.github.com"
-)
+TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
+GITHUB_API_BASE = "https://api.github.com"
 
 
 # ============================================================
-# BASIC CHECKS
+# ENVIRONMENT
 # ============================================================
-
 
 def check_environment():
 
     missing = []
 
     if not TWELVE_DATA_API_KEY:
-        missing.append(
-            "TWELVE_DATA_API_KEY"
-        )
+        missing.append("TWELVE_DATA_API_KEY")
 
     if not TELEGRAM_BOT_TOKEN:
-        missing.append(
-            "TELEGRAM_BOT_TOKEN"
-        )
+        missing.append("TELEGRAM_BOT_TOKEN")
 
     if not TELEGRAM_CHAT_ID:
-        missing.append(
-            "TELEGRAM_CHAT_ID"
-        )
+        missing.append("TELEGRAM_CHAT_ID")
+
+    if not GITHUB_TOKEN:
+        missing.append("GITHUB_TOKEN")
+
+    if not GITHUB_REPOSITORY:
+        missing.append("GITHUB_REPOSITORY")
 
     if missing:
-
         raise RuntimeError(
             "Missing environment variables: "
             + ", ".join(missing)
@@ -79,9 +58,8 @@ def check_environment():
 
 
 # ============================================================
-# GET MARKET DATA
+# TWELVE DATA
 # ============================================================
-
 
 def get_data(interval):
 
@@ -104,14 +82,11 @@ def get_data(interval):
     data = response.json()
 
     if "values" not in data:
-
         raise RuntimeError(
             f"Twelve Data error: {data}"
         )
 
-    df = pd.DataFrame(
-        data["values"]
-    )
+    df = pd.DataFrame(data["values"])
 
     required = [
         "open",
@@ -121,7 +96,6 @@ def get_data(interval):
     ]
 
     for column in required:
-
         df[column] = pd.to_numeric(
             df[column],
             errors="coerce"
@@ -143,7 +117,6 @@ def get_data(interval):
 # ============================================================
 # TELEGRAM
 # ============================================================
-
 
 def send_telegram(message):
 
@@ -168,66 +141,38 @@ def send_telegram(message):
     result = response.json()
 
     if not result.get("ok"):
-
         raise RuntimeError(
             f"Telegram error: {result}"
         )
 
 
 # ============================================================
-# GITHUB STATE STORAGE
+# GITHUB HEADERS
 # ============================================================
-
 
 def github_headers():
 
-    token = os.getenv(
-        "GITHUB_TOKEN"
-    )
-
-    if not token:
-        return None
-
     return {
         "Authorization":
-            f"Bearer {token}",
+            f"Bearer {GITHUB_TOKEN}",
+
         "Accept":
             "application/vnd.github+json",
+
         "X-GitHub-Api-Version":
             "2022-11-28",
     }
 
 
+# ============================================================
+# READ STATE FROM GITHUB
+# ============================================================
+
 def get_github_state():
-
-    """
-    Read signal_state.json from GitHub.
-
-    If it does not exist yet, return a blank state.
-    """
-
-    token = os.getenv(
-        "GITHUB_TOKEN"
-    )
-
-    repository = os.getenv(
-        "GITHUB_REPOSITORY"
-    )
-
-    if not token or not repository:
-
-        print(
-            "WARNING: GitHub state storage "
-            "variables unavailable."
-        )
-
-        return {
-            "status": "NONE"
-        }
 
     url = (
         f"{GITHUB_API_BASE}/repos/"
-        f"{repository}/contents/"
+        f"{GITHUB_REPOSITORY}/contents/"
         f"{STATE_FILE}"
     )
 
@@ -237,67 +182,51 @@ def get_github_state():
         timeout=30,
     )
 
+    # File does not exist yet.
     if response.status_code == 404:
 
         return {
-            "status": "NONE"
+            "status": "NONE",
+            "_sha": None,
         }
 
     response.raise_for_status()
 
     data = response.json()
 
-    import base64
-
     content = base64.b64decode(
         data["content"]
     ).decode("utf-8")
 
-    state = json.loads(
-        content
-    )
+    state = json.loads(content)
 
     state["_sha"] = data["sha"]
 
     return state
 
 
-def save_github_state(state):
+# ============================================================
+# SAVE STATE TO GITHUB
+# ============================================================
+
+def save_github_state(state, max_attempts=3):
 
     """
-    Save signal state back to GitHub.
+    Save signal_state.json to GitHub.
 
-    This allows the next GitHub Actions run
-    to remember the previous setup.
+    Handles GitHub 409/422 conflicts by retrieving
+    the latest file SHA and trying again.
     """
 
-    token = os.getenv(
-        "GITHUB_TOKEN"
-    )
+    clean_state = dict(state)
 
-    repository = os.getenv(
-        "GITHUB_REPOSITORY"
-    )
-
-    if not token or not repository:
-
-        print(
-            "WARNING: Could not save GitHub state."
-        )
-
-        return
-
-    sha = state.pop(
-        "_sha",
-        None
-    )
+    # Never store GitHub's internal SHA inside the JSON.
+    clean_state.pop("_sha", None)
 
     content = json.dumps(
-        state,
+        clean_state,
         indent=2
     )
-
-    import base64
 
     encoded = base64.b64encode(
         content.encode("utf-8")
@@ -305,30 +234,103 @@ def save_github_state(state):
 
     url = (
         f"{GITHUB_API_BASE}/repos/"
-        f"{repository}/contents/"
+        f"{GITHUB_REPOSITORY}/contents/"
         f"{STATE_FILE}"
     )
 
-    payload = {
-        "message":
-            "Update APA signal state",
-        "content": encoded,
-    }
+    sha = state.get("_sha")
 
-    if sha:
-        payload["sha"] = sha
+    for attempt in range(
+        1,
+        max_attempts + 1
+    ):
 
-    response = requests.put(
-        url,
-        headers=github_headers(),
-        json=payload,
-        timeout=30,
-    )
+        payload = {
+            "message":
+                "Update APA signal state",
 
-    response.raise_for_status()
+            "content":
+                encoded,
+        }
 
-    print(
-        "Signal state saved to GitHub."
+        if sha:
+            payload["sha"] = sha
+
+        print(
+            f"Saving signal state "
+            f"(attempt {attempt}/{max_attempts})..."
+        )
+
+        response = requests.put(
+            url,
+            headers=github_headers(),
+            json=payload,
+            timeout=30,
+        )
+
+        # Success
+        if response.status_code in (
+            200,
+            201,
+        ):
+
+            result = response.json()
+
+            new_sha = (
+                result
+                .get("content", {})
+                .get("sha")
+            )
+
+            state["_sha"] = new_sha
+
+            print(
+                "Signal state saved to GitHub."
+            )
+
+            return True
+
+        # GitHub says the file changed.
+        if response.status_code in (
+            409,
+            422,
+        ):
+
+            print(
+                "GitHub state conflict detected."
+            )
+
+            # Get the newest SHA.
+            refresh = requests.get(
+                url,
+                headers=github_headers(),
+                timeout=30,
+            )
+
+            if refresh.status_code == 200:
+
+                latest = refresh.json()
+
+                sha = latest.get(
+                    "sha"
+                )
+
+                print(
+                    "Retrieved latest GitHub "
+                    "state SHA."
+                )
+
+                continue
+
+        print(
+            "GitHub state save failed:",
+            response.status_code,
+            response.text,
+        )
+
+    raise RuntimeError(
+        "Could not save signal_state.json "
+        "to GitHub after multiple attempts."
     )
 
 
@@ -336,18 +338,13 @@ def save_github_state(state):
 # SIGNAL FINGERPRINT
 # ============================================================
 
-
 def signal_fingerprint(signal):
 
-    """
-    Create a unique ID for a setup.
-
-    Same direction + entry + SL + TP
-    = same setup.
-    """
-
     side = str(
-        signal.get("side", "")
+        signal.get(
+            "side",
+            ""
+        )
     ).upper()
 
     entry = round(
@@ -383,7 +380,6 @@ def signal_fingerprint(signal):
 # CURRENT PRICE
 # ============================================================
 
-
 def get_current_price():
 
     params = {
@@ -405,7 +401,6 @@ def get_current_price():
     data = response.json()
 
     if "values" not in data:
-
         raise RuntimeError(
             f"Price error: {data}"
         )
@@ -418,18 +413,18 @@ def get_current_price():
 
 
 # ============================================================
-# CHECK ACTIVE TRADE
+# CLOSE ACTIVE SIGNAL
 # ============================================================
-
 
 def check_active_signal(state):
 
-    if state.get("status") != "ACTIVE":
+    if state.get(
+        "status"
+    ) != "ACTIVE":
+
         return state
 
-    side = state.get(
-        "side"
-    )
+    side = state.get("side")
 
     entry = float(
         state["entry"]
@@ -474,9 +469,9 @@ def check_active_signal(state):
         price
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SELL
-    # --------------------------------------------------------
+    # ========================================================
 
     if side == "SELL":
 
@@ -500,7 +495,7 @@ def check_active_signal(state):
             )
 
             save_github_state(
-                state.copy()
+                state
             )
 
             return state
@@ -525,14 +520,14 @@ def check_active_signal(state):
             )
 
             save_github_state(
-                state.copy()
+                state
             )
 
             return state
 
-    # --------------------------------------------------------
+    # ========================================================
     # BUY
-    # --------------------------------------------------------
+    # ========================================================
 
     if side == "BUY":
 
@@ -556,7 +551,7 @@ def check_active_signal(state):
             )
 
             save_github_state(
-                state.copy()
+                state
             )
 
             return state
@@ -581,7 +576,7 @@ def check_active_signal(state):
             )
 
             save_github_state(
-                state.copy()
+                state
             )
 
             return state
@@ -594,9 +589,8 @@ def check_active_signal(state):
 
 
 # ============================================================
-# FORMAT APA SIGNAL
+# FORMAT SIGNAL
 # ============================================================
-
 
 def format_signal(signal):
 
@@ -628,7 +622,7 @@ def format_signal(signal):
         "APA setup"
     )
 
-    message = (
+    return (
         "🚨 XAUUSD APA SIGNAL 🚨\n\n"
 
         f"📊 Direction: {side}\n"
@@ -639,18 +633,13 @@ def format_signal(signal):
 
         f"📈 Bias: {bias}\n\n"
 
-        f"🔎 Setup: {reason}\n\n"
-
-        "🧪 Demo/Test Signal"
+        f"🔎 Setup: {reason}"
     )
-
-    return message
 
 
 # ============================================================
 # MAIN
 # ============================================================
-
 
 def main():
 
@@ -660,9 +649,9 @@ def main():
 
     check_environment()
 
-    # --------------------------------------------------------
-    # GET DATA
-    # --------------------------------------------------------
+    # ========================================================
+    # MARKET DATA
+    # ========================================================
 
     h4 = get_data("4h")
     h1 = get_data("1h")
@@ -675,9 +664,9 @@ def main():
         len(m15)
     )
 
-    # --------------------------------------------------------
-    # LOAD PREVIOUS SIGNAL
-    # --------------------------------------------------------
+    # ========================================================
+    # LOAD STATE
+    # ========================================================
 
     state = get_github_state()
 
@@ -689,9 +678,9 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # CHECK ACTIVE SIGNAL FIRST
-    # --------------------------------------------------------
+    # ========================================================
+    # ACTIVE SIGNAL CHECK
+    # ========================================================
 
     if state.get(
         "status"
@@ -717,14 +706,11 @@ def main():
 
             return
 
-        # If SL or TP was hit,
-        # continue to look for a NEW setup.
-
         state = updated_state
 
-    # --------------------------------------------------------
-    # RUN APA ENGINE
-    # --------------------------------------------------------
+    # ========================================================
+    # APA ENGINE
+    # ========================================================
 
     signal = analyze(
         h4,
@@ -740,9 +726,9 @@ def main():
 
         return
 
-    # --------------------------------------------------------
-    # CREATE SIGNAL ID
-    # --------------------------------------------------------
+    # ========================================================
+    # SIGNAL ID
+    # ========================================================
 
     fingerprint = (
         signal_fingerprint(
@@ -755,18 +741,14 @@ def main():
         fingerprint
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # DUPLICATE CHECK
-    # --------------------------------------------------------
+    # ========================================================
 
-    previous_fingerprint = (
+    if (
         state.get(
             "fingerprint"
         )
-    )
-
-    if (
-        previous_fingerprint
         == fingerprint
     ):
 
@@ -780,9 +762,9 @@ def main():
 
         return
 
-    # --------------------------------------------------------
-    # SEND NEW SIGNAL
-    # --------------------------------------------------------
+    # ========================================================
+    # SEND TELEGRAM
+    # ========================================================
 
     message = format_signal(
         signal
@@ -796,9 +778,9 @@ def main():
         "NEW APA SIGNAL SENT TO TELEGRAM."
     )
 
-    # --------------------------------------------------------
-    # SAVE ACTIVE SIGNAL
-    # --------------------------------------------------------
+    # ========================================================
+    # SAVE NEW ACTIVE STATE
+    # ========================================================
 
     new_state = {
         "status": "ACTIVE",
@@ -842,6 +824,11 @@ def main():
             ),
     }
 
+    # Carry the latest SHA from the state
+    # we read at the beginning.
+    if state.get("_sha"):
+        new_state["_sha"] = state["_sha"]
+
     save_github_state(
         new_state
     )
@@ -854,7 +841,6 @@ def main():
 # ============================================================
 # START
 # ============================================================
-
 
 if __name__ == "__main__":
     main()
