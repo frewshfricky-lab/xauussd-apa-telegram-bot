@@ -9,7 +9,6 @@ from apa_engine import analyze
 
 # ============================================================
 # CLOUD XAUUSD APA BOT
-# SIGNAL STATE + DUPLICATE PROTECTION
 # ============================================================
 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
@@ -20,7 +19,6 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
 SYMBOL = "XAU/USD"
-
 STATE_FILE = "signal_state.json"
 
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
@@ -61,12 +59,12 @@ def check_environment():
 # TWELVE DATA
 # ============================================================
 
-def get_data(interval):
+def get_data(interval, outputsize=200):
 
     params = {
         "symbol": SYMBOL,
         "interval": interval,
-        "outputsize": 200,
+        "outputsize": outputsize,
         "apikey": TWELVE_DATA_API_KEY,
         "format": "JSON",
     }
@@ -88,28 +86,17 @@ def get_data(interval):
 
     df = pd.DataFrame(data["values"])
 
-    required = [
-        "open",
-        "high",
-        "low",
-        "close",
-    ]
-
-    for column in required:
+    for column in ["open", "high", "low", "close"]:
         df[column] = pd.to_numeric(
             df[column],
             errors="coerce"
         )
 
     df = df.dropna(
-        subset=required
+        subset=["open", "high", "low", "close"]
     )
 
-    df = df.iloc[::-1]
-
-    df = df.reset_index(
-        drop=True
-    )
+    df = df.iloc[::-1].reset_index(drop=True)
 
     return df
 
@@ -153,19 +140,14 @@ def send_telegram(message):
 def github_headers():
 
     return {
-        "Authorization":
-            f"Bearer {GITHUB_TOKEN}",
-
-        "Accept":
-            "application/vnd.github+json",
-
-        "X-GitHub-Api-Version":
-            "2022-11-28",
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
 # ============================================================
-# READ STATE FROM GITHUB
+# GET GITHUB STATE
 # ============================================================
 
 def get_github_state():
@@ -182,7 +164,6 @@ def get_github_state():
         timeout=30,
     )
 
-    # File does not exist yet.
     if response.status_code == 404:
 
         return {
@@ -206,21 +187,13 @@ def get_github_state():
 
 
 # ============================================================
-# SAVE STATE TO GITHUB
+# SAVE GITHUB STATE
 # ============================================================
 
 def save_github_state(state, max_attempts=3):
 
-    """
-    Save signal_state.json to GitHub.
-
-    Handles GitHub 409/422 conflicts by retrieving
-    the latest file SHA and trying again.
-    """
-
     clean_state = dict(state)
 
-    # Never store GitHub's internal SHA inside the JSON.
     clean_state.pop("_sha", None)
 
     content = json.dumps(
@@ -240,17 +213,11 @@ def save_github_state(state, max_attempts=3):
 
     sha = state.get("_sha")
 
-    for attempt in range(
-        1,
-        max_attempts + 1
-    ):
+    for attempt in range(1, max_attempts + 1):
 
         payload = {
-            "message":
-                "Update APA signal state",
-
-            "content":
-                encoded,
+            "message": "Update APA signal state",
+            "content": encoded,
         }
 
         if sha:
@@ -268,21 +235,15 @@ def save_github_state(state, max_attempts=3):
             timeout=30,
         )
 
-        # Success
-        if response.status_code in (
-            200,
-            201,
-        ):
+        if response.status_code in (200, 201):
 
             result = response.json()
 
-            new_sha = (
+            state["_sha"] = (
                 result
                 .get("content", {})
                 .get("sha")
             )
-
-            state["_sha"] = new_sha
 
             print(
                 "Signal state saved to GitHub."
@@ -290,17 +251,12 @@ def save_github_state(state, max_attempts=3):
 
             return True
 
-        # GitHub says the file changed.
-        if response.status_code in (
-            409,
-            422,
-        ):
+        if response.status_code in (409, 422):
 
             print(
                 "GitHub state conflict detected."
             )
 
-            # Get the newest SHA.
             refresh = requests.get(
                 url,
                 headers=github_headers(),
@@ -311,13 +267,10 @@ def save_github_state(state, max_attempts=3):
 
                 latest = refresh.json()
 
-                sha = latest.get(
-                    "sha"
-                )
+                sha = latest.get("sha")
 
                 print(
-                    "Retrieved latest GitHub "
-                    "state SHA."
+                    "Retrieved latest GitHub state SHA."
                 )
 
                 continue
@@ -341,30 +294,21 @@ def save_github_state(state, max_attempts=3):
 def signal_fingerprint(signal):
 
     side = str(
-        signal.get(
-            "side",
-            ""
-        )
+        signal.get("side", "")
     ).upper()
 
     entry = round(
-        float(
-            signal["entry"]
-        ),
+        float(signal["entry"]),
         2
     )
 
     sl = round(
-        float(
-            signal["sl"]
-        ),
+        float(signal["sl"]),
         2
     )
 
     tp = round(
-        float(
-            signal["tp"]
-        ),
+        float(signal["tp"]),
         2
     )
 
@@ -377,7 +321,7 @@ def signal_fingerprint(signal):
 
 
 # ============================================================
-# CURRENT PRICE
+# GET CURRENT PRICE
 # ============================================================
 
 def get_current_price():
@@ -405,23 +349,38 @@ def get_current_price():
             f"Price error: {data}"
         )
 
-    candle = data["values"][0]
-
     return float(
-        candle["close"]
+        data["values"][0]["close"]
     )
 
 
 # ============================================================
-# CLOSE ACTIVE SIGNAL
+# GET RECENT CANDLE
+# ============================================================
+
+def get_recent_candle():
+
+    data = get_data(
+        "1min",
+        outputsize=2
+    )
+
+    candle = data.iloc[-1]
+
+    return {
+        "high": float(candle["high"]),
+        "low": float(candle["low"]),
+        "close": float(candle["close"]),
+    }
+
+
+# ============================================================
+# CHECK ACTIVE SIGNAL
 # ============================================================
 
 def check_active_signal(state):
 
-    if state.get(
-        "status"
-    ) != "ACTIVE":
-
+    if state.get("status") != "ACTIVE":
         return state
 
     side = state.get("side")
@@ -438,7 +397,12 @@ def check_active_signal(state):
         state["tp"]
     )
 
-    price = get_current_price()
+    current_price = get_current_price()
+
+    candle = get_recent_candle()
+
+    candle_high = candle["high"]
+    candle_low = candle["low"]
 
     print(
         "ACTIVE SIGNAL CHECK"
@@ -466,7 +430,17 @@ def check_active_signal(state):
 
     print(
         "Current price:",
-        price
+        current_price
+    )
+
+    print(
+        "Recent candle HIGH:",
+        candle_high
+    )
+
+    print(
+        "Recent candle LOW:",
+        candle_low
     )
 
     # ========================================================
@@ -475,11 +449,21 @@ def check_active_signal(state):
 
     if side == "SELL":
 
-        if price >= sl:
+        # SL can be detected either by the current price
+        # OR by the recent candle HIGH.
+        if (
+            current_price >= sl
+            or candle_high >= sl
+        ):
 
             state["status"] = "SL_HIT"
 
-            state["closed_price"] = price
+            state["closed_price"] = (
+                max(
+                    current_price,
+                    candle_high
+                )
+            )
 
             print(
                 "RESULT: SELL SL HIT"
@@ -490,21 +474,29 @@ def check_active_signal(state):
                 "📊 Direction: SELL\n"
                 "❌ Status: STOP LOSS HIT\n\n"
                 f"🛑 SL: {sl:.2f}\n"
-                f"📍 Price: {price:.2f}\n\n"
+                f"📍 Price: {state['closed_price']:.2f}\n\n"
                 "⏳ Waiting for a NEW APA setup."
             )
 
-            save_github_state(
-                state
-            )
+            save_github_state(state)
 
             return state
 
-        if price <= tp:
+        # TP can be detected by the current price
+        # OR by the recent candle LOW.
+        if (
+            current_price <= tp
+            or candle_low <= tp
+        ):
 
             state["status"] = "TP_HIT"
 
-            state["closed_price"] = price
+            state["closed_price"] = (
+                min(
+                    current_price,
+                    candle_low
+                )
+            )
 
             print(
                 "RESULT: SELL TP HIT"
@@ -515,13 +507,11 @@ def check_active_signal(state):
                 "📊 Direction: SELL\n"
                 "✅ Status: TAKE PROFIT HIT\n\n"
                 f"💰 TP: {tp:.2f}\n"
-                f"📍 Price: {price:.2f}\n\n"
+                f"📍 Price: {state['closed_price']:.2f}\n\n"
                 "⏳ Waiting for a NEW APA setup."
             )
 
-            save_github_state(
-                state
-            )
+            save_github_state(state)
 
             return state
 
@@ -531,11 +521,21 @@ def check_active_signal(state):
 
     if side == "BUY":
 
-        if price <= sl:
+        # SL can be detected either by the current price
+        # OR by the recent candle LOW.
+        if (
+            current_price <= sl
+            or candle_low <= sl
+        ):
 
             state["status"] = "SL_HIT"
 
-            state["closed_price"] = price
+            state["closed_price"] = (
+                min(
+                    current_price,
+                    candle_low
+                )
+            )
 
             print(
                 "RESULT: BUY SL HIT"
@@ -546,21 +546,29 @@ def check_active_signal(state):
                 "📊 Direction: BUY\n"
                 "❌ Status: STOP LOSS HIT\n\n"
                 f"🛑 SL: {sl:.2f}\n"
-                f"📍 Price: {price:.2f}\n\n"
+                f"📍 Price: {state['closed_price']:.2f}\n\n"
                 "⏳ Waiting for a NEW APA setup."
             )
 
-            save_github_state(
-                state
-            )
+            save_github_state(state)
 
             return state
 
-        if price >= tp:
+        # TP can be detected either by the current price
+        # OR by the recent candle HIGH.
+        if (
+            current_price >= tp
+            or candle_high >= tp
+        ):
 
             state["status"] = "TP_HIT"
 
-            state["closed_price"] = price
+            state["closed_price"] = (
+                max(
+                    current_price,
+                    candle_high
+                )
+            )
 
             print(
                 "RESULT: BUY TP HIT"
@@ -571,13 +579,11 @@ def check_active_signal(state):
                 "📊 Direction: BUY\n"
                 "✅ Status: TAKE PROFIT HIT\n\n"
                 f"💰 TP: {tp:.2f}\n"
-                f"📍 Price: {price:.2f}\n\n"
+                f"📍 Price: {state['closed_price']:.2f}\n\n"
                 "⏳ Waiting for a NEW APA setup."
             )
 
-            save_github_state(
-                state
-            )
+            save_github_state(state)
 
             return state
 
@@ -679,17 +685,13 @@ def main():
     )
 
     # ========================================================
-    # ACTIVE SIGNAL CHECK
+    # ACTIVE SIGNAL
     # ========================================================
 
-    if state.get(
-        "status"
-    ) == "ACTIVE":
+    if state.get("status") == "ACTIVE":
 
-        updated_state = (
-            check_active_signal(
-                state
-            )
+        updated_state = check_active_signal(
+            state
         )
 
         if updated_state.get(
@@ -730,10 +732,8 @@ def main():
     # SIGNAL ID
     # ========================================================
 
-    fingerprint = (
-        signal_fingerprint(
-            signal
-        )
+    fingerprint = signal_fingerprint(
+        signal
     )
 
     print(
@@ -746,9 +746,7 @@ def main():
     # ========================================================
 
     if (
-        state.get(
-            "fingerprint"
-        )
+        state.get("fingerprint")
         == fingerprint
     ):
 
@@ -763,7 +761,7 @@ def main():
         return
 
     # ========================================================
-    # SEND TELEGRAM
+    # SEND SIGNAL
     # ========================================================
 
     message = format_signal(
@@ -779,7 +777,7 @@ def main():
     )
 
     # ========================================================
-    # SAVE NEW ACTIVE STATE
+    # SAVE ACTIVE STATE
     # ========================================================
 
     new_state = {
@@ -824,8 +822,6 @@ def main():
             ),
     }
 
-    # Carry the latest SHA from the state
-    # we read at the beginning.
     if state.get("_sha"):
         new_state["_sha"] = state["_sha"]
 
@@ -839,7 +835,7 @@ def main():
 
 
 # ============================================================
-# START
+# START BOT
 # ============================================================
 
 if __name__ == "__main__":
