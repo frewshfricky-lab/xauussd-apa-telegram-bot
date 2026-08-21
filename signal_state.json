@@ -1,5 +1,5 @@
 {
-  "status": "ACTIVE",
+  "status": "TP_HIT",
   "fingerprint": "BUY|4535.72|4508.4|4617.67",
   "side": "BUY",
   "entry": 4535.72,
@@ -7,5 +7,6 @@
   "tp": 4617.67,
   "rr": 3.0,
   "bias": "H4 BULLISH / H1 NEUTRAL",
-  "reason": "SWING LOW liquidity sweep + M15 CHoCH/BOS confirmation"
+  "reason": "SWING LOW liquidity sweep + M15 CHoCH/BOS confirmation",
+  "closed_price": 4620.68936
 }
