@@ -4,6 +4,8 @@ import base64
 import requests
 import pandas as pd
 
+from datetime import datetime, timezone
+
 from apa_engine import analyze
 
 
@@ -19,6 +21,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
 SYMBOL = "XAU/USD"
+
 STATE_FILE = "signal_state.json"
 
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
@@ -86,17 +89,36 @@ def get_data(interval, outputsize=200):
 
     df = pd.DataFrame(data["values"])
 
+    if df.empty:
+        raise RuntimeError(
+            f"No data returned for {SYMBOL} {interval}"
+        )
+
     for column in ["open", "high", "low", "close"]:
         df[column] = pd.to_numeric(
             df[column],
             errors="coerce"
         )
 
-    df = df.dropna(
-        subset=["open", "high", "low", "close"]
+    df["datetime"] = pd.to_datetime(
+        df["datetime"],
+        errors="coerce",
+        utc=True
     )
 
-    df = df.iloc[::-1].reset_index(drop=True)
+    df = df.dropna(
+        subset=[
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+    )
+
+    df = df.sort_values(
+        "datetime"
+    ).reset_index(drop=True)
 
     return df
 
@@ -131,6 +153,8 @@ def send_telegram(message):
         raise RuntimeError(
             f"Telegram error: {result}"
         )
+
+    print("Telegram message sent.")
 
 
 # ============================================================
@@ -321,73 +345,92 @@ def signal_fingerprint(signal):
 
 
 # ============================================================
-# GET CURRENT PRICE
+# CURRENT UTC TIME
 # ============================================================
 
-def get_current_price():
+def utc_now():
 
-    params = {
-        "symbol": SYMBOL,
-        "interval": "1min",
-        "outputsize": 1,
-        "apikey": TWELVE_DATA_API_KEY,
-        "format": "JSON",
-    }
-
-    response = requests.get(
-        TWELVE_DATA_URL,
-        params=params,
-        timeout=30,
+    return datetime.now(
+        timezone.utc
     )
 
-    response.raise_for_status()
 
-    data = response.json()
+def utc_now_string():
 
-    if "values" not in data:
-        raise RuntimeError(
-            f"Price error: {data}"
+    return utc_now().isoformat()
+
+
+# ============================================================
+# PARSE STATE TIME
+# ============================================================
+
+def parse_state_time(value):
+
+    if not value:
+        return None
+
+    try:
+
+        timestamp = pd.to_datetime(
+            value,
+            utc=True
         )
 
-    return float(
-        data["values"][0]["close"]
+        if pd.isna(timestamp):
+            return None
+
+        return timestamp
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# GET 1-MINUTE HISTORY
+# ============================================================
+
+def get_monitoring_candles():
+
+    print(
+        "Downloading recent 1-minute "
+        "candles for TP/SL monitoring..."
     )
-
-
-# ============================================================
-# GET RECENT CANDLE
-# ============================================================
-
-def get_recent_candle():
 
     data = get_data(
         "1min",
-        outputsize=2
+        outputsize=2000
     )
 
-    candle = data.iloc[-1]
+    print(
+        "1-minute candles received:",
+        len(data)
+    )
 
-    return {
-        "high": float(candle["high"]),
-        "low": float(candle["low"]),
-        "close": float(candle["close"]),
-    }
+    if not data.empty:
+
+        print(
+            "Monitoring period:",
+            data.iloc[0]["datetime"],
+            "to",
+            data.iloc[-1]["datetime"]
+        )
+
+    return data
 
 
 # ============================================================
-# CHECK ACTIVE SIGNAL
+# FIND TP / SL TOUCH
 # ============================================================
 
-def check_active_signal(state):
+def find_exit_event(state, candles):
 
-    if state.get("status") != "ACTIVE":
-        return state
+    if candles.empty:
+        return None
 
-    side = state.get("side")
-
-    entry = float(
-        state["entry"]
-    )
+    side = str(
+        state.get("side", "")
+    ).upper()
 
     sl = float(
         state["sl"]
@@ -397,12 +440,314 @@ def check_active_signal(state):
         state["tp"]
     )
 
-    current_price = get_current_price()
+    signal_time = parse_state_time(
+        state.get("signal_time")
+    )
 
-    candle = get_recent_candle()
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # New signals have signal_time.
+    # Old ACTIVE signals created by the previous bot may not.
+    #
+    # If signal_time is missing, we monitor the available
+    # history so the old active signal can still be detected.
+    # --------------------------------------------------------
 
-    candle_high = candle["high"]
-    candle_low = candle["low"]
+    if signal_time is not None:
+
+        candles_to_check = candles[
+            candles["datetime"] >= signal_time
+        ].copy()
+
+        print(
+            "Candles checked since signal:",
+            len(candles_to_check)
+        )
+
+    else:
+
+        candles_to_check = candles.copy()
+
+        print(
+            "WARNING: Existing ACTIVE signal "
+            "has no signal_time."
+        )
+
+        print(
+            "Checking available 1-minute history "
+            "to recover TP/SL status."
+        )
+
+    if candles_to_check.empty:
+
+        print(
+            "No monitoring candles available "
+            "after signal time."
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Check candles in chronological order.
+    # --------------------------------------------------------
+
+    for _, candle in candles_to_check.iterrows():
+
+        candle_time = candle["datetime"]
+
+        high = float(
+            candle["high"]
+        )
+
+        low = float(
+            candle["low"]
+        )
+
+        # ====================================================
+        # SELL
+        # ====================================================
+
+        if side == "SELL":
+
+            sl_touched = high >= sl
+            tp_touched = low <= tp
+
+            # ------------------------------------------------
+            # If both were touched in the SAME 1-minute
+            # candle, exact order cannot be known from OHLC.
+            #
+            # Use candle open/close to make a conservative
+            # determination where possible.
+            # ------------------------------------------------
+
+            if sl_touched and tp_touched:
+
+                open_price = float(
+                    candle["open"]
+                )
+
+                close_price = float(
+                    candle["close"]
+                )
+
+                print(
+                    "WARNING: SELL candle touched "
+                    "both TP and SL:",
+                    candle_time
+                )
+
+                # If candle closed below TP, TP is the
+                # more likely completed target.
+                if close_price <= tp:
+
+                    return {
+                        "type": "TP_HIT",
+                        "price": tp,
+                        "time": candle_time,
+                    }
+
+                # If candle closed above SL, SL is the
+                # more likely completed stop.
+                if close_price >= sl:
+
+                    return {
+                        "type": "SL_HIT",
+                        "price": sl,
+                        "time": candle_time,
+                    }
+
+                # Otherwise do not guess.
+                print(
+                    "Ambiguous candle. "
+                    "Waiting for clearer evidence."
+                )
+
+                continue
+
+            if sl_touched:
+
+                return {
+                    "type": "SL_HIT",
+                    "price": sl,
+                    "time": candle_time,
+                }
+
+            if tp_touched:
+
+                return {
+                    "type": "TP_HIT",
+                    "price": tp,
+                    "time": candle_time,
+                }
+
+        # ====================================================
+        # BUY
+        # ====================================================
+
+        elif side == "BUY":
+
+            sl_touched = low <= sl
+            tp_touched = high >= tp
+
+            if sl_touched and tp_touched:
+
+                open_price = float(
+                    candle["open"]
+                )
+
+                close_price = float(
+                    candle["close"]
+                )
+
+                print(
+                    "WARNING: BUY candle touched "
+                    "both TP and SL:",
+                    candle_time
+                )
+
+                if close_price >= tp:
+
+                    return {
+                        "type": "TP_HIT",
+                        "price": tp,
+                        "time": candle_time,
+                    }
+
+                if close_price <= sl:
+
+                    return {
+                        "type": "SL_HIT",
+                        "price": sl,
+                        "time": candle_time,
+                    }
+
+                print(
+                    "Ambiguous candle. "
+                    "Waiting for clearer evidence."
+                )
+
+                continue
+
+            if sl_touched:
+
+                return {
+                    "type": "SL_HIT",
+                    "price": sl,
+                    "time": candle_time,
+                }
+
+            if tp_touched:
+
+                return {
+                    "type": "TP_HIT",
+                    "price": tp,
+                    "time": candle_time,
+                }
+
+    return None
+
+
+# ============================================================
+# CLOSE ACTIVE SIGNAL
+# ============================================================
+
+def close_signal(state, exit_event):
+
+    exit_type = exit_event["type"]
+
+    exit_price = float(
+        exit_event["price"]
+    )
+
+    exit_time = exit_event["time"]
+
+    side = str(
+        state["side"]
+    ).upper()
+
+    tp = float(
+        state["tp"]
+    )
+
+    sl = float(
+        state["sl"]
+    )
+
+    if exit_type == "TP_HIT":
+
+        state["status"] = "TP_HIT"
+
+        state["closed_price"] = exit_price
+
+        state["closed_time"] = str(
+            exit_time
+        )
+
+        message = (
+            "🎯 XAUUSD APA TRADE UPDATE\n\n"
+            f"📊 Direction: {side}\n"
+            "✅ Status: TAKE PROFIT HIT\n\n"
+            f"💰 TP: {tp:.2f}\n"
+            f"📍 TP Price: {exit_price:.2f}\n"
+            f"🕐 Detected Candle: {exit_time}\n\n"
+            "🔒 Signal CLOSED.\n"
+            "⏳ Waiting for a NEW APA setup."
+        )
+
+        print(
+            f"RESULT: {side} TP HIT"
+        )
+
+    else:
+
+        state["status"] = "SL_HIT"
+
+        state["closed_price"] = exit_price
+
+        state["closed_time"] = str(
+            exit_time
+        )
+
+        message = (
+            "🛑 XAUUSD APA TRADE UPDATE\n\n"
+            f"📊 Direction: {side}\n"
+            "❌ Status: STOP LOSS HIT\n\n"
+            f"🛑 SL: {sl:.2f}\n"
+            f"📍 SL Price: {exit_price:.2f}\n"
+            f"🕐 Detected Candle: {exit_time}\n\n"
+            "🔒 Signal CLOSED.\n"
+            "⏳ Waiting for a NEW APA setup."
+        )
+
+        print(
+            f"RESULT: {side} SL HIT"
+        )
+
+    send_telegram(
+        message
+    )
+
+    save_github_state(
+        state
+    )
+
+    return state
+
+
+# ============================================================
+# CHECK ACTIVE SIGNAL
+# ============================================================
+
+def check_active_signal(state):
+
+    if state.get("status") != "ACTIVE":
+
+        return state
+
+    print(
+        "================================================"
+    )
 
     print(
         "ACTIVE SIGNAL CHECK"
@@ -410,185 +755,62 @@ def check_active_signal(state):
 
     print(
         "Direction:",
-        side
+        state.get("side")
     )
 
     print(
         "Entry:",
-        entry
+        state.get("entry")
     )
 
     print(
         "SL:",
-        sl
+        state.get("sl")
     )
 
     print(
         "TP:",
-        tp
+        state.get("tp")
     )
 
     print(
-        "Current price:",
-        current_price
+        "Signal time:",
+        state.get(
+            "signal_time",
+            "UNKNOWN"
+        )
     )
 
     print(
-        "Recent candle HIGH:",
-        candle_high
+        "================================================"
     )
 
-    print(
-        "Recent candle LOW:",
-        candle_low
+    candles = get_monitoring_candles()
+
+    exit_event = find_exit_event(
+        state,
+        candles
     )
 
-    # ========================================================
-    # SELL
-    # ========================================================
+    if exit_event:
 
-    if side == "SELL":
+        print(
+            "EXIT EVENT FOUND:",
+            exit_event
+        )
 
-        # SL can be detected either by the current price
-        # OR by the recent candle HIGH.
-        if (
-            current_price >= sl
-            or candle_high >= sl
-        ):
-
-            state["status"] = "SL_HIT"
-
-            state["closed_price"] = (
-                max(
-                    current_price,
-                    candle_high
-                )
-            )
-
-            print(
-                "RESULT: SELL SL HIT"
-            )
-
-            send_telegram(
-                "🛑 XAUUSD APA TRADE UPDATE\n\n"
-                "📊 Direction: SELL\n"
-                "❌ Status: STOP LOSS HIT\n\n"
-                f"🛑 SL: {sl:.2f}\n"
-                f"📍 Price: {state['closed_price']:.2f}\n\n"
-                "⏳ Waiting for a NEW APA setup."
-            )
-
-            save_github_state(state)
-
-            return state
-
-        # TP can be detected by the current price
-        # OR by the recent candle LOW.
-        if (
-            current_price <= tp
-            or candle_low <= tp
-        ):
-
-            state["status"] = "TP_HIT"
-
-            state["closed_price"] = (
-                min(
-                    current_price,
-                    candle_low
-                )
-            )
-
-            print(
-                "RESULT: SELL TP HIT"
-            )
-
-            send_telegram(
-                "🎯 XAUUSD APA TRADE UPDATE\n\n"
-                "📊 Direction: SELL\n"
-                "✅ Status: TAKE PROFIT HIT\n\n"
-                f"💰 TP: {tp:.2f}\n"
-                f"📍 Price: {state['closed_price']:.2f}\n\n"
-                "⏳ Waiting for a NEW APA setup."
-            )
-
-            save_github_state(state)
-
-            return state
-
-    # ========================================================
-    # BUY
-    # ========================================================
-
-    if side == "BUY":
-
-        # SL can be detected either by the current price
-        # OR by the recent candle LOW.
-        if (
-            current_price <= sl
-            or candle_low <= sl
-        ):
-
-            state["status"] = "SL_HIT"
-
-            state["closed_price"] = (
-                min(
-                    current_price,
-                    candle_low
-                )
-            )
-
-            print(
-                "RESULT: BUY SL HIT"
-            )
-
-            send_telegram(
-                "🛑 XAUUSD APA TRADE UPDATE\n\n"
-                "📊 Direction: BUY\n"
-                "❌ Status: STOP LOSS HIT\n\n"
-                f"🛑 SL: {sl:.2f}\n"
-                f"📍 Price: {state['closed_price']:.2f}\n\n"
-                "⏳ Waiting for a NEW APA setup."
-            )
-
-            save_github_state(state)
-
-            return state
-
-        # TP can be detected either by the current price
-        # OR by the recent candle HIGH.
-        if (
-            current_price >= tp
-            or candle_high >= tp
-        ):
-
-            state["status"] = "TP_HIT"
-
-            state["closed_price"] = (
-                max(
-                    current_price,
-                    candle_high
-                )
-            )
-
-            print(
-                "RESULT: BUY TP HIT"
-            )
-
-            send_telegram(
-                "🎯 XAUUSD APA TRADE UPDATE\n\n"
-                "📊 Direction: BUY\n"
-                "✅ Status: TAKE PROFIT HIT\n\n"
-                f"💰 TP: {tp:.2f}\n"
-                f"📍 Price: {state['closed_price']:.2f}\n\n"
-                "⏳ Waiting for a NEW APA setup."
-            )
-
-            save_github_state(state)
-
-            return state
+        return close_signal(
+            state,
+            exit_event
+        )
 
     print(
         "ACTIVE SIGNAL: STILL OPEN"
+    )
+
+    print(
+        "No TP or SL detected "
+        "in monitoring history."
     )
 
     return state
@@ -650,28 +872,21 @@ def format_signal(signal):
 def main():
 
     print(
+        "================================================"
+    )
+
+    print(
         "Cloud XAUUSD APA check started"
+    )
+
+    print(
+        "================================================"
     )
 
     check_environment()
 
     # ========================================================
-    # MARKET DATA
-    # ========================================================
-
-    h4 = get_data("4h")
-    h1 = get_data("1h")
-    m15 = get_data("15min")
-
-    print(
-        "DATA CHECK:",
-        len(h4),
-        len(h1),
-        len(m15)
-    )
-
-    # ========================================================
-    # LOAD STATE
+    # LOAD STATE FIRST
     # ========================================================
 
     state = get_github_state()
@@ -686,6 +901,10 @@ def main():
 
     # ========================================================
     # ACTIVE SIGNAL
+    #
+    # IMPORTANT:
+    # We check the existing trade BEFORE looking for a new
+    # APA setup.
     # ========================================================
 
     if state.get("status") == "ACTIVE":
@@ -693,6 +912,10 @@ def main():
         updated_state = check_active_signal(
             state
         )
+
+        # ----------------------------------------------------
+        # If still ACTIVE, absolutely NO new signal.
+        # ----------------------------------------------------
 
         if updated_state.get(
             "status"
@@ -708,7 +931,48 @@ def main():
 
             return
 
+        # ----------------------------------------------------
+        # TP_HIT or SL_HIT:
+        #
+        # The old trade is now CLOSED.
+        # Continue below and search for a genuinely new setup.
+        # ----------------------------------------------------
+
         state = updated_state
+
+        print(
+            "Previous signal is CLOSED."
+        )
+
+        print(
+            "Searching for a NEW APA setup..."
+        )
+
+    # ========================================================
+    # MARKET DATA
+    # ========================================================
+
+    h4 = get_data(
+        "4h",
+        outputsize=200
+    )
+
+    h1 = get_data(
+        "1h",
+        outputsize=200
+    )
+
+    m15 = get_data(
+        "15min",
+        outputsize=200
+    )
+
+    print(
+        "DATA CHECK:",
+        len(h4),
+        len(h1),
+        len(m15)
+    )
 
     # ========================================================
     # APA ENGINE
@@ -777,14 +1041,38 @@ def main():
     )
 
     # ========================================================
+    # SIGNAL TIME
+    #
+    # We use the latest closed M15 candle as the signal's
+    # starting point.
+    # ========================================================
+
+    signal_time = None
+
+    if not m15.empty:
+
+        signal_time = str(
+            m15.iloc[-1]["datetime"]
+        )
+
+    if not signal_time:
+
+        signal_time = utc_now_string()
+
+    # ========================================================
     # SAVE ACTIVE STATE
     # ========================================================
 
     new_state = {
-        "status": "ACTIVE",
+
+        "status":
+            "ACTIVE",
 
         "fingerprint":
             fingerprint,
+
+        "signal_time":
+            signal_time,
 
         "side":
             signal["side"],
@@ -820,10 +1108,17 @@ def main():
                 "reason",
                 ""
             ),
+
+        "created_at":
+            utc_now_string(),
     }
 
+    # Preserve GitHub file SHA.
     if state.get("_sha"):
-        new_state["_sha"] = state["_sha"]
+
+        new_state["_sha"] = (
+            state["_sha"]
+        )
 
     save_github_state(
         new_state
@@ -833,10 +1128,20 @@ def main():
         "APA SIGNAL STATUS: ACTIVE"
     )
 
+    print(
+        "Signal time:",
+        signal_time
+    )
+
+    print(
+        "Waiting for TP or SL..."
+    )
+
 
 # ============================================================
 # START BOT
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
