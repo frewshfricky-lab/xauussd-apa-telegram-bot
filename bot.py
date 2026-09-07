@@ -5,33 +5,47 @@ import requests
 import pandas as pd
 
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
 
 from apa_engine import analyze
 
 
 # ============================================================
 # CLOUD XAUUSD APA BOT
-# ============================================================
 #
-# FEATURES:
+# FEATURES
+# ============================================================
 #
 # 1. APA signal generation
-# 2. TP/SL monitoring
+# 2. Active trade protection
 # 3. Duplicate signal protection
-# 4. Persistent GitHub state
-# 5. XAUUSD pip calculation
-# 6. Completed trade history
-# 7. Monday-Friday weekly statistics
-# 8. Automatic Saturday weekly report
+# 4. TP / SL monitoring
+# 5. Pip calculation
+# 6. Weekly Monday-Friday performance tracking
+# 7. Saturday weekly report
+# 8. GitHub persistent state
 #
-# XAUUSD:
+# XAUUSD PIP DEFINITION:
 # 0.01 price movement = 1 pip
+#
+# Example:
+# Entry 4476.67
+# TP    4405.97
+#
+# Difference = 70.70
+# Pips = 7070
+#
 # ============================================================
 
 
-TWELVE_DATA_API_KEY = os.getenv(
-    "TWELVE_DATA_API_KEY"
+# ============================================================
+# ENVIRONMENT VARIABLES
+# ============================================================
+
+# Support BOTH possible names so the existing GitHub Secret
+# can continue working.
+TWELVE_DATA_API_KEY = (
+    os.getenv("TWELVEDATA_API_KEY")
+    or os.getenv("TWELVE_DATA_API_KEY")
 )
 
 TELEGRAM_BOT_TOKEN = os.getenv(
@@ -51,9 +65,17 @@ GITHUB_REPOSITORY = os.getenv(
 )
 
 
+# ============================================================
+# SETTINGS
+# ============================================================
+
 SYMBOL = "XAU/USD"
 
 STATE_FILE = "signal_state.json"
+
+PERFORMANCE_FILE = "apa_performance.json"
+
+WEEKLY_REPORT_FILE = "weekly_report_state.json"
 
 TWELVE_DATA_URL = (
     "https://api.twelvedata.com/time_series"
@@ -63,31 +85,13 @@ GITHUB_API_BASE = (
     "https://api.github.com"
 )
 
-
-# ============================================================
-# XAUUSD PIP SETTINGS
-# ============================================================
-
-XAUUSD_PIP_SIZE = 0.01
+# XAUUSD:
+# 0.01 price movement = 1 pip
+PIP_SIZE = 0.01
 
 
 # ============================================================
-# WEEKLY REPORT SETTINGS
-# ============================================================
-
-# Nigeria/Lagos timezone.
-# Saturday morning report is targeted for 8:00 AM local time.
-
-REPORT_TIMEZONE = ZoneInfo(
-    "Africa/Lagos"
-)
-
-REPORT_HOUR = 8
-REPORT_MINUTE = 0
-
-
-# ============================================================
-# ENVIRONMENT
+# ENVIRONMENT CHECK
 # ============================================================
 
 def check_environment():
@@ -96,7 +100,7 @@ def check_environment():
 
     if not TWELVE_DATA_API_KEY:
         missing.append(
-            "TWELVE_DATA_API_KEY"
+            "TWELVEDATA_API_KEY"
         )
 
     if not TELEGRAM_BOT_TOKEN:
@@ -175,7 +179,7 @@ def get_data(
         "open",
         "high",
         "low",
-        "close"
+        "close",
     ]:
 
         df[column] = pd.to_numeric(
@@ -195,7 +199,7 @@ def get_data(
             "open",
             "high",
             "low",
-            "close"
+            "close",
         ]
     )
 
@@ -264,29 +268,18 @@ def github_headers():
 
 
 # ============================================================
-# DEFAULT STATE
+# GET GITHUB FILE
 # ============================================================
 
-def default_state():
-
-    return {
-        "status": "NONE",
-        "weekly_trades": [],
-        "last_weekly_report": None,
-        "_sha": None,
-    }
-
-
-# ============================================================
-# GET GITHUB STATE
-# ============================================================
-
-def get_github_state():
+def get_github_file(
+    filename,
+    default_value
+):
 
     url = (
         f"{GITHUB_API_BASE}/repos/"
         f"{GITHUB_REPOSITORY}/contents/"
-        f"{STATE_FILE}"
+        f"{filename}"
     )
 
     response = requests.get(
@@ -297,7 +290,14 @@ def get_github_state():
 
     if response.status_code == 404:
 
-        return default_state()
+        return (
+            default_value.copy()
+            if isinstance(
+                default_value,
+                dict
+            )
+            else default_value
+        )
 
     response.raise_for_status()
 
@@ -307,45 +307,42 @@ def get_github_state():
         data["content"]
     ).decode("utf-8")
 
-    state = json.loads(
-        content
+    result = json.loads(content)
+
+    if isinstance(result, dict):
+
+        result["_sha"] = data["sha"]
+
+    return result
+
+
+# ============================================================
+# GET SIGNAL STATE
+# ============================================================
+
+def get_github_state():
+
+    return get_github_file(
+        STATE_FILE,
+        {
+            "status": "NONE",
+            "_sha": None,
+        }
     )
 
-    # --------------------------------------------------------
-    # Upgrade old state files safely.
-    # --------------------------------------------------------
-
-    if not isinstance(
-        state.get("weekly_trades"),
-        list
-    ):
-
-        state["weekly_trades"] = []
-
-    if (
-        "last_weekly_report"
-        not in state
-    ):
-
-        state["last_weekly_report"] = None
-
-    state["_sha"] = data["sha"]
-
-    return state
-
 
 # ============================================================
-# SAVE GITHUB STATE
+# SAVE GITHUB FILE
 # ============================================================
 
-def save_github_state(
+def save_github_file(
+    filename,
     state,
-    max_attempts=3
+    commit_message,
+    max_attempts=5
 ):
 
-    clean_state = dict(
-        state
-    )
+    clean_state = dict(state)
 
     clean_state.pop(
         "_sha",
@@ -364,7 +361,7 @@ def save_github_state(
     url = (
         f"{GITHUB_API_BASE}/repos/"
         f"{GITHUB_REPOSITORY}/contents/"
-        f"{STATE_FILE}"
+        f"{filename}"
     )
 
     sha = state.get(
@@ -378,7 +375,7 @@ def save_github_state(
 
         payload = {
             "message":
-                "Update APA signal state",
+                commit_message,
 
             "content":
                 encoded,
@@ -389,9 +386,9 @@ def save_github_state(
             payload["sha"] = sha
 
         print(
-            f"Saving signal state "
-            f"(attempt {attempt}/"
-            f"{max_attempts})..."
+            f"Saving {filename} "
+            f"(attempt "
+            f"{attempt}/{max_attempts})..."
         )
 
         response = requests.put(
@@ -415,7 +412,8 @@ def save_github_state(
             )
 
             print(
-                "Signal state saved to GitHub."
+                f"{filename} "
+                "saved to GitHub."
             )
 
             return True
@@ -426,7 +424,8 @@ def save_github_state(
         ):
 
             print(
-                "GitHub state conflict detected."
+                "GitHub file conflict. "
+                "Refreshing SHA..."
             )
 
             refresh = requests.get(
@@ -437,28 +436,96 @@ def save_github_state(
 
             if refresh.status_code == 200:
 
-                latest = refresh.json()
+                latest = (
+                    refresh.json()
+                )
 
                 sha = latest.get(
                     "sha"
                 )
 
-                print(
-                    "Retrieved latest GitHub "
-                    "state SHA."
-                )
+                state["_sha"] = sha
 
                 continue
 
         print(
-            "GitHub state save failed:",
+            "GitHub save failed:",
             response.status_code,
-            response.text,
+            response.text
         )
 
     raise RuntimeError(
-        "Could not save signal_state.json "
-        "to GitHub after multiple attempts."
+        f"Could not save {filename} "
+        "to GitHub."
+    )
+
+
+# ============================================================
+# SIGNAL STATE SAVE
+# ============================================================
+
+def save_github_state(state):
+
+    return save_github_file(
+        STATE_FILE,
+        state,
+        "Update APA signal state"
+    )
+
+
+# ============================================================
+# PERFORMANCE STATE
+# ============================================================
+
+def get_performance_state():
+
+    default = {
+        "trades": [],
+        "_sha": None,
+    }
+
+    return get_github_file(
+        PERFORMANCE_FILE,
+        default
+    )
+
+
+def save_performance_state(
+    performance
+):
+
+    return save_github_file(
+        PERFORMANCE_FILE,
+        performance,
+        "Update APA performance"
+    )
+
+
+# ============================================================
+# WEEKLY REPORT STATE
+# ============================================================
+
+def get_weekly_report_state():
+
+    default = {
+        "last_report_week": "",
+        "_sha": None,
+    }
+
+    return get_github_file(
+        WEEKLY_REPORT_FILE,
+        default
+    )
+
+
+def save_weekly_report_state(
+    state
+):
+
+    return save_github_file(
+        WEEKLY_REPORT_FILE,
+        state,
+        "Update APA weekly report state"
     )
 
 
@@ -505,7 +572,7 @@ def signal_fingerprint(signal):
 
 
 # ============================================================
-# CURRENT UTC TIME
+# TIME
 # ============================================================
 
 def utc_now():
@@ -521,12 +588,13 @@ def utc_now_string():
 
 
 # ============================================================
-# PARSE STATE TIME
+# PARSE TIME
 # ============================================================
 
 def parse_state_time(value):
 
     if not value:
+
         return None
 
     try:
@@ -548,52 +616,475 @@ def parse_state_time(value):
 
 
 # ============================================================
-# XAUUSD PIPS
+# PIP CALCULATION
 # ============================================================
 
-def price_to_pips(
-    price_distance
-):
-
-    return (
-        abs(
-            float(price_distance)
-        )
-        /
-        XAUUSD_PIP_SIZE
-    )
-
-
-def calculate_trade_pips(
-    side,
+def calculate_pips(
     entry,
-    exit_price
+    exit_price,
+    side
 ):
+
+    entry = float(entry)
+
+    exit_price = float(
+        exit_price
+    )
 
     side = str(
         side
     ).upper()
 
-    entry = float(entry)
-    exit_price = float(exit_price)
-
     if side == "BUY":
 
-        return (
+        price_difference = (
             exit_price - entry
-        ) / XAUUSD_PIP_SIZE
+        )
 
-    if side == "SELL":
+    else:
 
-        return (
+        price_difference = (
             entry - exit_price
-        ) / XAUUSD_PIP_SIZE
+        )
 
-    return 0.0
+    pips = (
+        price_difference
+        / PIP_SIZE
+    )
+
+    return round(
+        pips,
+        2
+    )
 
 
 # ============================================================
-# GET 1-MINUTE HISTORY
+# FORMAT PIPS
+# ============================================================
+
+def format_pips(pips):
+
+    pips = float(pips)
+
+    if pips > 0:
+
+        return f"+{pips:.2f} pips"
+
+    return f"{pips:.2f} pips"
+
+
+# ============================================================
+# RECORD CLOSED TRADE
+# ============================================================
+
+def record_closed_trade(
+    state,
+    exit_event
+):
+
+    performance = (
+        get_performance_state()
+    )
+
+    trades = performance.get(
+        "trades",
+        []
+    )
+
+    side = str(
+        state.get(
+            "side",
+            ""
+        )
+    ).upper()
+
+    entry = float(
+        state["entry"]
+    )
+
+    exit_price = float(
+        exit_event["price"]
+    )
+
+    result_type = (
+        exit_event["type"]
+    )
+
+    pips = calculate_pips(
+        entry,
+        exit_price,
+        side
+    )
+
+    trade = {
+
+        "closed_at":
+            str(
+                exit_event["time"]
+            ),
+
+        "side":
+            side,
+
+        "entry":
+            entry,
+
+        "exit":
+            exit_price,
+
+        "sl":
+            float(
+                state["sl"]
+            ),
+
+        "tp":
+            float(
+                state["tp"]
+            ),
+
+        "result":
+            result_type,
+
+        "pips":
+            pips,
+
+        "fingerprint":
+            state.get(
+                "fingerprint",
+                ""
+            ),
+    }
+
+    # Prevent accidental duplicate recording.
+    for old_trade in trades:
+
+        if (
+            old_trade.get(
+                "fingerprint"
+            )
+            == trade["fingerprint"]
+            and old_trade.get(
+                "closed_at"
+            )
+            == trade["closed_at"]
+        ):
+
+            print(
+                "Trade already recorded."
+            )
+
+            return performance
+
+    trades.append(
+        trade
+    )
+
+    performance["trades"] = trades
+
+    save_performance_state(
+        performance
+    )
+
+    print(
+        "Closed trade recorded."
+    )
+
+    print(
+        "RESULT:",
+        result_type
+    )
+
+    print(
+        "PIPS:",
+        format_pips(pips)
+    )
+
+    return performance
+
+
+# ============================================================
+# WEEK IDENTIFICATION
+# ============================================================
+
+def get_week_start(
+    timestamp
+):
+
+    timestamp = pd.Timestamp(
+        timestamp
+    )
+
+    if timestamp.tzinfo is None:
+
+        timestamp = timestamp.tz_localize(
+            "UTC"
+        )
+
+    else:
+
+        timestamp = timestamp.tz_convert(
+            "UTC"
+        )
+
+    monday = (
+        timestamp
+        - pd.Timedelta(
+            days=timestamp.weekday()
+        )
+    )
+
+    monday = monday.normalize()
+
+    return monday
+
+
+# ============================================================
+# WEEKLY STATISTICS
+# ============================================================
+
+def calculate_weekly_stats(
+    trades,
+    reference_time=None
+):
+
+    if reference_time is None:
+
+        reference_time = pd.Timestamp(
+            utc_now()
+        )
+
+    week_start = get_week_start(
+        reference_time
+    )
+
+    week_end = (
+        week_start
+        + pd.Timedelta(
+            days=5
+        )
+    )
+
+    weekly_trades = []
+
+    for trade in trades:
+
+        closed_at = parse_state_time(
+            trade.get(
+                "closed_at"
+            )
+        )
+
+        if closed_at is None:
+
+            continue
+
+        if (
+            closed_at >= week_start
+            and closed_at < week_end
+        ):
+
+            weekly_trades.append(
+                trade
+            )
+
+    wins = sum(
+        1
+        for trade in weekly_trades
+        if trade.get(
+            "result"
+        ) == "TP_HIT"
+    )
+
+    losses = sum(
+        1
+        for trade in weekly_trades
+        if trade.get(
+            "result"
+        ) == "SL_HIT"
+    )
+
+    total = len(
+        weekly_trades
+    )
+
+    net_pips = sum(
+        float(
+            trade.get(
+                "pips",
+                0
+            )
+        )
+        for trade in weekly_trades
+    )
+
+    win_rate = (
+        (wins / total) * 100
+        if total > 0
+        else 0
+    )
+
+    return {
+
+        "week_start":
+            str(
+                week_start.date()
+            ),
+
+        "wins":
+            wins,
+
+        "losses":
+            losses,
+
+        "total":
+            total,
+
+        "net_pips":
+            round(
+                net_pips,
+                2
+            ),
+
+        "win_rate":
+            round(
+                win_rate,
+                2
+            ),
+    }
+
+
+# ============================================================
+# SEND WEEKLY REPORT
+# ============================================================
+
+def send_weekly_report_if_needed():
+
+    now = utc_now()
+
+    # Python weekday:
+    # Monday = 0
+    # Tuesday = 1
+    # Wednesday = 2
+    # Thursday = 3
+    # Friday = 4
+    # Saturday = 5
+    # Sunday = 6
+
+    if now.weekday() != 5:
+
+        return
+
+    report_state = (
+        get_weekly_report_state()
+    )
+
+    current_week_start = (
+        get_week_start(now)
+    )
+
+    week_key = str(
+        current_week_start.date()
+    )
+
+    if (
+        report_state.get(
+            "last_report_week"
+        )
+        == week_key
+    ):
+
+        print(
+            "Weekly report already sent "
+            "for this week."
+        )
+
+        return
+
+    performance = (
+        get_performance_state()
+    )
+
+    trades = performance.get(
+        "trades",
+        []
+    )
+
+    stats = calculate_weekly_stats(
+        trades,
+        now
+    )
+
+    if stats["total"] == 0:
+
+        message = (
+            "📊 XAUUSD APA WEEKLY REPORT\n\n"
+            f"📅 Week: "
+            f"{stats['week_start']}\n\n"
+            "No closed APA trades recorded "
+            "for the previous Monday-Friday period."
+        )
+
+    else:
+
+        net_pips = stats[
+            "net_pips"
+        ]
+
+        if net_pips > 0:
+
+            pip_text = (
+                f"+{net_pips:.2f} pips"
+            )
+
+        else:
+
+            pip_text = (
+                f"{net_pips:.2f} pips"
+            )
+
+        message = (
+            "📊 XAUUSD APA WEEKLY REPORT\n\n"
+
+            f"📅 Week starting: "
+            f"{stats['week_start']}\n\n"
+
+            f"📈 Total trades: "
+            f"{stats['total']}\n"
+
+            f"✅ Wins: "
+            f"{stats['wins']}\n"
+
+            f"❌ Losses: "
+            f"{stats['losses']}\n\n"
+
+            f"🎯 Win rate: "
+            f"{stats['win_rate']:.2f}%\n"
+
+            f"📊 Net result: "
+            f"{pip_text}\n\n"
+
+            "Monday-Friday trading results."
+        )
+
+    send_telegram(
+        message
+    )
+
+    report_state[
+        "last_report_week"
+    ] = week_key
+
+    save_weekly_report_state(
+        report_state
+    )
+
+    print(
+        "Weekly APA report sent."
+    )
+
+
+# ============================================================
+# GET MONITORING CANDLES
 # ============================================================
 
 def get_monitoring_candles():
@@ -626,7 +1117,7 @@ def get_monitoring_candles():
 
 
 # ============================================================
-# FIND TP / SL TOUCH
+# FIND TP / SL EVENT
 # ============================================================
 
 def find_exit_event(
@@ -661,10 +1152,13 @@ def find_exit_event(
 
     if signal_time is not None:
 
-        candles_to_check = candles[
-            candles["datetime"]
-            >= signal_time
-        ].copy()
+        candles_to_check = (
+            candles[
+                candles["datetime"]
+                >= signal_time
+            ]
+            .copy()
+        )
 
         print(
             "Candles checked since signal:",
@@ -678,21 +1172,15 @@ def find_exit_event(
         )
 
         print(
-            "WARNING: Existing ACTIVE signal "
+            "WARNING: ACTIVE signal "
             "has no signal_time."
         )
 
         print(
-            "Checking available 1-minute history "
-            "to recover TP/SL status."
+            "Checking available history."
         )
 
     if candles_to_check.empty:
-
-        print(
-            "No monitoring candles available "
-            "after signal time."
-        )
 
         return None
 
@@ -700,9 +1188,9 @@ def find_exit_event(
         candles_to_check.iterrows()
     ):
 
-        candle_time = candle[
-            "datetime"
-        ]
+        candle_time = (
+            candle["datetime"]
+        )
 
         high = float(
             candle["high"]
@@ -736,8 +1224,8 @@ def find_exit_event(
                 )
 
                 print(
-                    "WARNING: SELL candle touched "
-                    "both TP and SL:",
+                    "WARNING: SELL candle "
+                    "touched both TP and SL:",
                     candle_time
                 )
 
@@ -824,8 +1312,8 @@ def find_exit_event(
                 )
 
                 print(
-                    "WARNING: BUY candle touched "
-                    "both TP and SL:",
+                    "WARNING: BUY candle "
+                    "touched both TP and SL:",
                     candle_time
                 )
 
@@ -892,148 +1380,6 @@ def find_exit_event(
 
 
 # ============================================================
-# RECORD COMPLETED TRADE
-# ============================================================
-
-def record_completed_trade(
-    state,
-    exit_event
-):
-
-    if not isinstance(
-        state.get("weekly_trades"),
-        list
-    ):
-
-        state["weekly_trades"] = []
-
-    side = str(
-        state["side"]
-    ).upper()
-
-    entry = float(
-        state["entry"]
-    )
-
-    exit_price = float(
-        exit_event["price"]
-    )
-
-    result_type = exit_event[
-        "type"
-    ]
-
-    trade_pips = calculate_trade_pips(
-        side,
-        entry,
-        exit_price
-    )
-
-    if result_type == "TP_HIT":
-
-        result = "WIN"
-
-        r_result = float(
-            state.get(
-                "rr",
-                3.0
-            )
-        )
-
-    else:
-
-        result = "LOSS"
-
-        r_result = -1.0
-
-    trade_record = {
-
-        "side":
-            side,
-
-        "entry":
-            entry,
-
-        "sl":
-            float(
-                state["sl"]
-            ),
-
-        "tp":
-            float(
-                state["tp"]
-            ),
-
-        "exit":
-            exit_price,
-
-        "result":
-            result,
-
-        "status":
-            result_type,
-
-        "pips":
-            round(
-                trade_pips,
-                1
-            ),
-
-        "r":
-            round(
-                r_result,
-                2
-            ),
-
-        "signal_time":
-            state.get(
-                "signal_time"
-            ),
-
-        "closed_time":
-            str(
-                exit_event["time"]
-            ),
-
-        "fingerprint":
-            state.get(
-                "fingerprint"
-            ),
-    }
-
-    state["weekly_trades"].append(
-        trade_record
-    )
-
-    print(
-        "COMPLETED TRADE RECORDED"
-    )
-
-    print(
-        "Result:",
-        result
-    )
-
-    print(
-        "Pips:",
-        round(
-            trade_pips,
-            1
-        )
-    )
-
-    print(
-        "R:",
-        round(
-            r_result,
-            2
-        )
-    )
-
-    return trade_record
-
-
-# ============================================================
 # CLOSE ACTIVE SIGNAL
 # ============================================================
 
@@ -1042,17 +1388,17 @@ def close_signal(
     exit_event
 ):
 
-    exit_type = exit_event[
-        "type"
-    ]
+    exit_type = (
+        exit_event["type"]
+    )
 
     exit_price = float(
         exit_event["price"]
     )
 
-    exit_time = exit_event[
-        "time"
-    ]
+    exit_time = (
+        exit_event["time"]
+    )
 
     side = str(
         state["side"]
@@ -1070,32 +1416,28 @@ def close_signal(
         state["sl"]
     )
 
-    # --------------------------------------------------------
-    # Calculate actual completed-trade pips.
-    # --------------------------------------------------------
-
-    completed_pips = calculate_trade_pips(
-        side,
+    pips = calculate_pips(
         entry,
+        exit_price,
+        side
+    )
+
+    state["closed_price"] = (
         exit_price
     )
 
-    # ========================================================
-    # TAKE PROFIT
-    # ========================================================
+    state["closed_time"] = str(
+        exit_time
+    )
+
+    state["closed_pips"] = (
+        pips
+    )
 
     if exit_type == "TP_HIT":
 
         state["status"] = (
             "TP_HIT"
-        )
-
-        state["closed_price"] = (
-            exit_price
-        )
-
-        state["closed_time"] = str(
-            exit_time
         )
 
         message = (
@@ -1106,11 +1448,10 @@ def close_signal(
 
             f"🎯 Entry: {entry:.2f}\n"
             f"💰 TP: {tp:.2f}\n"
-            f"📍 TP Price: "
-            f"{exit_price:.2f}\n\n"
+            f"📍 TP Price: {exit_price:.2f}\n\n"
 
-            f"📈 Pips Gained: "
-            f"+{completed_pips:.1f}\n\n"
+            f"📈 Result: "
+            f"{format_pips(pips)}\n"
 
             f"🕐 Detected Candle: "
             f"{exit_time}\n\n"
@@ -1123,22 +1464,10 @@ def close_signal(
             f"RESULT: {side} TP HIT"
         )
 
-    # ========================================================
-    # STOP LOSS
-    # ========================================================
-
     else:
 
         state["status"] = (
             "SL_HIT"
-        )
-
-        state["closed_price"] = (
-            exit_price
-        )
-
-        state["closed_time"] = str(
-            exit_time
         )
 
         message = (
@@ -1149,11 +1478,10 @@ def close_signal(
 
             f"🎯 Entry: {entry:.2f}\n"
             f"🛑 SL: {sl:.2f}\n"
-            f"📍 SL Price: "
-            f"{exit_price:.2f}\n\n"
+            f"📍 SL Price: {exit_price:.2f}\n\n"
 
-            f"📉 Pips Lost: "
-            f"{abs(completed_pips):.1f}\n\n"
+            f"📉 Result: "
+            f"{format_pips(pips)}\n"
 
             f"🕐 Detected Candle: "
             f"{exit_time}\n\n"
@@ -1167,16 +1495,16 @@ def close_signal(
         )
 
     # --------------------------------------------------------
-    # Record trade BEFORE saving state.
+    # Record performance FIRST.
     # --------------------------------------------------------
 
-    record_completed_trade(
+    record_closed_trade(
         state,
         exit_event
     )
 
     # --------------------------------------------------------
-    # Send result to Telegram.
+    # Telegram update.
     # --------------------------------------------------------
 
     send_telegram(
@@ -1184,7 +1512,7 @@ def close_signal(
     )
 
     # --------------------------------------------------------
-    # Save updated state.
+    # Save closed state.
     # --------------------------------------------------------
 
     save_github_state(
@@ -1202,9 +1530,12 @@ def check_active_signal(
     state
 ):
 
-    if state.get(
-        "status"
-    ) != "ACTIVE":
+    if (
+        state.get(
+            "status"
+        )
+        != "ACTIVE"
+    ):
 
         return state
 
@@ -1218,22 +1549,30 @@ def check_active_signal(
 
     print(
         "Direction:",
-        state.get("side")
+        state.get(
+            "side"
+        )
     )
 
     print(
         "Entry:",
-        state.get("entry")
+        state.get(
+            "entry"
+        )
     )
 
     print(
         "SL:",
-        state.get("sl")
+        state.get(
+            "sl"
+        )
     )
 
     print(
         "TP:",
-        state.get("tp")
+        state.get(
+            "tp"
+        )
     )
 
     print(
@@ -1274,15 +1613,14 @@ def check_active_signal(
     )
 
     print(
-        "No TP or SL detected "
-        "in monitoring history."
+        "No TP or SL detected."
     )
 
     return state
 
 
 # ============================================================
-# FORMAT SIGNAL
+# FORMAT NEW SIGNAL
 # ============================================================
 
 def format_signal(
@@ -1318,453 +1656,48 @@ def format_signal(
     )
 
     # --------------------------------------------------------
-    # Pip values supplied by APA engine.
-    #
-    # Fallback calculation is included so older/alternate
-    # engine output does not crash the bot.
+    # Calculate theoretical TP and SL pips.
     # --------------------------------------------------------
 
-    risk_pips = float(
-        signal.get(
-            "risk_pips",
-            price_to_pips(
-                abs(entry - sl)
-            )
-        )
-    )
+    if side.upper() == "BUY":
 
-    reward_pips = float(
-        signal.get(
-            "reward_pips",
-            price_to_pips(
-                abs(tp - entry)
-            )
-        )
-    )
+        potential_profit_pips = (
+            tp - entry
+        ) / PIP_SIZE
+
+        potential_loss_pips = (
+            entry - sl
+        ) / PIP_SIZE
+
+    else:
+
+        potential_profit_pips = (
+            entry - tp
+        ) / PIP_SIZE
+
+        potential_loss_pips = (
+            sl - entry
+        ) / PIP_SIZE
 
     return (
         "🚨 XAUUSD APA SIGNAL 🚨\n\n"
 
         f"📊 Direction: {side}\n"
-
         f"🎯 Entry: {entry:.2f}\n"
-
         f"🛑 Stop Loss: {sl:.2f}\n"
-
         f"💰 Take Profit: {tp:.2f}\n"
-
         f"📐 Risk/Reward: {rr:.1f}\n\n"
 
         f"📈 Potential Gain: "
-        f"+{reward_pips:.1f} pips\n"
+        f"+{potential_profit_pips:.2f} pips\n"
 
         f"📉 Potential Loss: "
-        f"-{risk_pips:.1f} pips\n\n"
+        f"-{potential_loss_pips:.2f} pips\n\n"
 
         f"📈 Bias: {bias}\n\n"
 
         f"🔎 Setup: {reason}"
     )
-
-
-# ============================================================
-# WEEKLY DATE HELPERS
-# ============================================================
-
-def local_now():
-
-    return datetime.now(
-        timezone.utc
-    ).astimezone(
-        REPORT_TIMEZONE
-    )
-
-
-def previous_week_range(
-    current_local
-):
-
-    # Monday = 0
-    # Sunday = 6
-
-    current_monday = (
-        current_local.date()
-        -
-        timedelta(
-            days=current_local.weekday()
-        )
-    )
-
-    previous_monday = (
-        current_monday
-        -
-        timedelta(days=7)
-    )
-
-    previous_friday = (
-        previous_monday
-        +
-        timedelta(days=4)
-    )
-
-    return (
-        previous_monday,
-        previous_friday
-    )
-
-
-# ============================================================
-# TRADE BELONGS TO WEEK?
-# ============================================================
-
-def trade_is_in_week(
-    trade,
-    week_start,
-    week_end
-):
-
-    closed_time = parse_state_time(
-        trade.get(
-            "closed_time"
-        )
-    )
-
-    if closed_time is None:
-
-        return False
-
-    local_date = (
-        closed_time
-        .to_pydatetime()
-        .astimezone(
-            REPORT_TIMEZONE
-        )
-        .date()
-    )
-
-    return (
-        week_start
-        <= local_date
-        <= week_end
-    )
-
-
-# ============================================================
-# BUILD WEEKLY REPORT
-# ============================================================
-
-def build_weekly_report(
-    trades,
-    week_start,
-    week_end
-):
-
-    weekly = [
-        trade
-        for trade in trades
-        if trade_is_in_week(
-            trade,
-            week_start,
-            week_end
-        )
-    ]
-
-    total = len(
-        weekly
-    )
-
-    wins = sum(
-        1
-        for trade in weekly
-        if trade.get(
-            "result"
-        ) == "WIN"
-    )
-
-    losses = sum(
-        1
-        for trade in weekly
-        if trade.get(
-            "result"
-        ) == "LOSS"
-    )
-
-    pips_won = sum(
-        float(
-            trade.get(
-                "pips",
-                0
-            )
-        )
-        for trade in weekly
-        if float(
-            trade.get(
-                "pips",
-                0
-            )
-        ) > 0
-    )
-
-    pips_lost = sum(
-        abs(
-            float(
-                trade.get(
-                    "pips",
-                    0
-                )
-            )
-        )
-        for trade in weekly
-        if float(
-            trade.get(
-                "pips",
-                0
-            )
-        ) < 0
-    )
-
-    net_pips = (
-        pips_won
-        - pips_lost
-    )
-
-    net_r = sum(
-        float(
-            trade.get(
-                "r",
-                0
-            )
-        )
-        for trade in weekly
-    )
-
-    if total > 0:
-
-        win_rate = (
-            wins
-            /
-            total
-        ) * 100
-
-    else:
-
-        win_rate = 0.0
-
-    if weekly:
-
-        best_trade = max(
-            weekly,
-            key=lambda x:
-                float(
-                    x.get(
-                        "pips",
-                        0
-                    )
-                )
-        )
-
-        worst_trade = min(
-            weekly,
-            key=lambda x:
-                float(
-                    x.get(
-                        "pips",
-                        0
-                    )
-                )
-
-    else:
-
-        best_trade = None
-        worst_trade = None
-
-    message = (
-        "📊 XAUUSD APA WEEKLY REPORT\n\n"
-
-        f"📅 Week: "
-        f"{week_start.strftime('%b %d')} "
-        f"– "
-        f"{week_end.strftime('%b %d, %Y')}\n\n"
-
-        f"📌 Total Trades: {total}\n"
-        f"✅ Wins: {wins}\n"
-        f"❌ Losses: {losses}\n"
-        f"📈 Win Rate: {win_rate:.1f}%\n\n"
-
-        f"🟢 Pips Won: +{pips_won:.1f}\n"
-        f"🔴 Pips Lost: -{pips_lost:.1f}\n"
-        f"📊 Net Pips: "
-        f"{net_pips:+.1f}\n\n"
-
-        f"💹 Net R: "
-        f"{net_r:+.2f}R\n"
-    )
-
-    if best_trade:
-
-        message += (
-            "\n🏆 Best Trade: "
-            f"{best_trade.get('side', '')} "
-            f"+{float(best_trade.get('pips', 0)):.1f} pips"
-        )
-
-    if worst_trade:
-
-        message += (
-            "\n📉 Worst Trade: "
-            f"{worst_trade.get('side', '')} "
-            f"{float(worst_trade.get('pips', 0)):+.1f} pips"
-        )
-
-    if not weekly:
-
-        message += (
-            "\n\nℹ️ No completed APA trades "
-            "were recorded Monday-Friday."
-        )
-
-    else:
-
-        message += (
-            "\n\n⏳ New trading week begins Monday."
-        )
-
-    return (
-        message,
-        weekly
-    )
-
-
-# ============================================================
-# SATURDAY WEEKLY REPORT
-# ============================================================
-
-def maybe_send_weekly_report(
-    state
-):
-
-    now_local = local_now()
-
-    # --------------------------------------------------------
-    # Only Saturday.
-    #
-    # Saturday = 5
-    # --------------------------------------------------------
-
-    if now_local.weekday() != 5:
-
-        return state
-
-    # --------------------------------------------------------
-    # Only after configured Saturday morning time.
-    # --------------------------------------------------------
-
-    if (
-        now_local.hour
-        < REPORT_HOUR
-    ):
-
-        return state
-
-    if (
-        now_local.hour
-        == REPORT_HOUR
-        and now_local.minute
-        < REPORT_MINUTE
-    ):
-
-        return state
-
-    week_start, week_end = (
-        previous_week_range(
-            now_local
-        )
-    )
-
-    report_key = (
-        week_start.isoformat()
-        +
-        "|"
-        +
-        week_end.isoformat()
-    )
-
-    # --------------------------------------------------------
-    # Prevent duplicate Saturday reports.
-    # --------------------------------------------------------
-
-    if (
-        state.get(
-            "last_weekly_report"
-        )
-        == report_key
-    ):
-
-        print(
-            "Weekly report already sent for:",
-            report_key
-        )
-
-        return state
-
-    trades = state.get(
-        "weekly_trades",
-        []
-    )
-
-    message, weekly = (
-        build_weekly_report(
-            trades,
-            week_start,
-            week_end
-        )
-    )
-
-    print(
-        "================================================"
-    )
-
-    print(
-        "SATURDAY WEEKLY REPORT"
-    )
-
-    print(
-        "Week:",
-        week_start,
-        "to",
-        week_end
-    )
-
-    print(
-        "Trades:",
-        len(weekly)
-    )
-
-    print(
-        "================================================"
-    )
-
-    send_telegram(
-        message
-    )
-
-    # --------------------------------------------------------
-    # Mark report as sent.
-    # --------------------------------------------------------
-
-    state[
-        "last_weekly_report"
-    ] = report_key
-
-    save_github_state(
-        state
-    )
-
-    print(
-        "Weekly report sent successfully."
-    )
-
-    return state
 
 
 # ============================================================
@@ -1787,11 +1720,19 @@ def main():
 
     check_environment()
 
-    # ========================================================
-    # LOAD STATE
-    # ========================================================
+    # --------------------------------------------------------
+    # Saturday weekly report check.
+    # --------------------------------------------------------
 
-    state = get_github_state()
+    send_weekly_report_if_needed()
+
+    # --------------------------------------------------------
+    # Load previous signal state.
+    # --------------------------------------------------------
+
+    state = (
+        get_github_state()
+    )
 
     print(
         "PREVIOUS SIGNAL STATUS:",
@@ -1801,25 +1742,16 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # Weekly report check.
-    #
-    # This happens before market analysis.
-    # On Saturday, the bot can report the previous
-    # Monday-Friday week.
-    # --------------------------------------------------------
-
-    state = maybe_send_weekly_report(
-        state
-    )
-
     # ========================================================
     # ACTIVE SIGNAL
     # ========================================================
 
-    if state.get(
-        "status"
-    ) == "ACTIVE":
+    if (
+        state.get(
+            "status"
+        )
+        == "ACTIVE"
+    ):
 
         updated_state = (
             check_active_signal(
@@ -1828,26 +1760,30 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Still active = NO new signal.
+        # STILL ACTIVE:
+        # ABSOLUTELY NO NEW SIGNAL.
         # ----------------------------------------------------
 
-        if updated_state.get(
-            "status"
-        ) == "ACTIVE":
+        if (
+            updated_state.get(
+                "status"
+            )
+            == "ACTIVE"
+        ):
 
             print(
                 "Existing APA setup is still active."
             )
 
             print(
-                "No new Telegram signal "
-                "will be sent."
+                "No new Telegram signal will be sent."
             )
 
             return
 
         # ----------------------------------------------------
-        # Closed trade.
+        # CLOSED:
+        # Search for a genuinely new setup.
         # ----------------------------------------------------
 
         state = updated_state
@@ -1905,7 +1841,7 @@ def main():
         return
 
     # ========================================================
-    # SIGNAL ID
+    # SIGNAL FINGERPRINT
     # ========================================================
 
     fingerprint = (
@@ -1965,7 +1901,9 @@ def main():
     if not m15.empty:
 
         signal_time = str(
-            m15.iloc[-1]["datetime"]
+            m15.iloc[-1][
+                "datetime"
+            ]
         )
 
     if not signal_time:
@@ -1973,40 +1911,6 @@ def main():
         signal_time = (
             utc_now_string()
         )
-
-    # ========================================================
-    # PIP VALUES
-    # ========================================================
-
-    entry = float(
-        signal["entry"]
-    )
-
-    sl = float(
-        signal["sl"]
-    )
-
-    tp = float(
-        signal["tp"]
-    )
-
-    risk_pips = float(
-        signal.get(
-            "risk_pips",
-            price_to_pips(
-                abs(entry - sl)
-            )
-        )
-    )
-
-    reward_pips = float(
-        signal.get(
-            "reward_pips",
-            price_to_pips(
-                abs(tp - entry)
-            )
-        )
-    )
 
     # ========================================================
     # SAVE ACTIVE STATE
@@ -2027,7 +1931,9 @@ def main():
             signal["side"],
 
         "entry":
-            entry,
+            float(
+                signal["entry"]
+            ),
 
         "sl":
             float(
@@ -2044,12 +1950,6 @@ def main():
                 signal["rr"]
             ),
 
-        "risk_pips":
-            risk_pips,
-
-        "reward_pips":
-            reward_pips,
-
         "bias":
             signal.get(
                 "bias",
@@ -2064,28 +1964,9 @@ def main():
 
         "created_at":
             utc_now_string(),
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Preserve all previously completed weekly trades.
-        # ----------------------------------------------------
-
-        "weekly_trades":
-            state.get(
-                "weekly_trades",
-                []
-            ),
-
-        "last_weekly_report":
-            state.get(
-                "last_weekly_report"
-            ),
     }
 
-    # --------------------------------------------------------
-    # Preserve GitHub file SHA.
-    # --------------------------------------------------------
-
+    # Preserve GitHub SHA.
     if state.get(
         "_sha"
     ):
@@ -2105,18 +1986,6 @@ def main():
     print(
         "Signal time:",
         signal_time
-    )
-
-    print(
-        "Potential gain:",
-        reward_pips,
-        "pips"
-    )
-
-    print(
-        "Potential loss:",
-        risk_pips,
-        "pips"
     )
 
     print(
