@@ -2,25 +2,75 @@ import pandas as pd
 
 
 # ============================================================
-# APA ENGINE — ADVANCED LIQUIDITY DETECTION
+# APA ENGINE v2.1 — STRUCTURAL RISK PROTECTION
 #
 # H4 = PRIMARY BIAS
 # H1 = DIRECTION / FILTER
 # M15 = LIQUIDITY + STRUCTURE + ENTRY
 #
 # APA FLOW:
-# ANALYSIS → POI → LIQUIDITY SWEEP → CHoCH/BOS → ENTRY
+# ANALYSIS
+# → DIRECTION
+# → LIQUIDITY SWEEP
+# → CHoCH/BOS
+# → STRUCTURAL SL
+# → MINIMUM RISK CHECK
+# → 1:3 TP
 #
-# MINIMUM RISK / REWARD = 1:3
+# v2.1 CHANGES:
+# 1. Structural SL remains beyond liquidity sweep.
+# 2. Abnormally tiny SL distances are rejected.
+# 3. Minimum risk is based on M15 ATR.
+# 4. Signal includes risk/reward in XAUUSD pips.
+#
+# XAUUSD PIP CONVENTION:
+# 1 pip = 0.01 price movement
+#
+# Example:
+# 4535.72 → 4508.40
+# Price movement = 27.32
+# Pips = 2732
 # ============================================================
 
 
 SWING_LOOKBACK = 3
 LIQUIDITY_LOOKBACK = 40
+
 MIN_RR = 3.0
+
+# ------------------------------------------------------------
+# XAUUSD pip size
+#
+# We define 0.01 price movement as 1 pip.
+# ------------------------------------------------------------
+
+XAUUSD_PIP_SIZE = 0.01
+
+
+# ------------------------------------------------------------
+# Minimum acceptable stop distance.
+#
+# The stop must be at least this fraction of current
+# M15 ATR.
+#
+# Example:
+#
+# ATR = 20.00
+# Minimum risk = 20 × 0.50 = 10.00 price points
+#
+# This prevents extremely tiny stops such as:
+# 1.15
+# 2.90
+#
+# without using a completely arbitrary fixed XAUUSD number.
+# ------------------------------------------------------------
+
+MIN_RISK_ATR_MULTIPLIER = 0.50
+
 
 # How close two highs/lows must be to be considered
 # approximately equal liquidity.
+
 EQUAL_LEVEL_TOLERANCE = 0.0015
 
 
@@ -29,11 +79,17 @@ def _prepare(df):
 
     data = df.copy()
 
-    required = ["open", "high", "low", "close"]
+    required = [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]
 
     for column in required:
 
         if column not in data.columns:
+
             raise ValueError(
                 f"Missing required column: {column}"
             )
@@ -51,7 +107,7 @@ def _prepare(df):
 
 
 def _atr(df, period=14):
-    """Calculate ATR."""
+    """Calculate Average True Range."""
 
     high = df["high"]
     low = df["low"]
@@ -101,7 +157,10 @@ def _swing_highs(df):
         ):
 
             result.append(
-                (i, float(value))
+                (
+                    i,
+                    float(value)
+                )
             )
 
     return result
@@ -135,7 +194,10 @@ def _swing_lows(df):
         ):
 
             result.append(
-                (i, float(value))
+                (
+                    i,
+                    float(value)
+                )
             )
 
     return result
@@ -171,18 +233,23 @@ def _structure_bias(df):
         latest_high > previous_high
         and latest_low > previous_low
     ):
+
         return "bullish"
 
     if (
         latest_high < previous_high
         and latest_low < previous_low
     ):
+
         return "bearish"
 
     return "neutral"
 
 
-def _select_direction(h4_bias, h1_bias):
+def _select_direction(
+    h4_bias,
+    h1_bias
+):
     """
     Select trading direction.
 
@@ -203,12 +270,14 @@ def _select_direction(h4_bias, h1_bias):
         h4_bias == "bullish"
         and h1_bias == "bearish"
     ):
+
         return None
 
     if (
         h4_bias == "bearish"
         and h1_bias == "bullish"
     ):
+
         return None
 
     if h4_bias == "bullish":
@@ -221,12 +290,14 @@ def _select_direction(h4_bias, h1_bias):
         h4_bias == "neutral"
         and h1_bias == "bullish"
     ):
+
         return "buy"
 
     if (
         h4_bias == "neutral"
         and h1_bias == "bearish"
     ):
+
         return "sell"
 
     return None
@@ -250,7 +321,10 @@ def _equal_high_groups(
         index_a, level_a = swing_highs[i]
 
         group = [
-            (index_a, level_a)
+            (
+                index_a,
+                level_a
+            )
         ]
 
         for j in range(
@@ -269,9 +343,16 @@ def _equal_high_groups(
                 0.00001
             )
 
-            if difference <= EQUAL_LEVEL_TOLERANCE:
+            if (
+                difference
+                <= EQUAL_LEVEL_TOLERANCE
+            ):
+
                 group.append(
-                    (index_b, level_b)
+                    (
+                        index_b,
+                        level_b
+                    )
                 )
 
         if len(group) >= 2:
@@ -298,7 +379,10 @@ def _equal_low_groups(
         index_a, level_a = swing_lows[i]
 
         group = [
-            (index_a, level_a)
+            (
+                index_a,
+                level_a
+            )
         ]
 
         for j in range(
@@ -317,9 +401,16 @@ def _equal_low_groups(
                 0.00001
             )
 
-            if difference <= EQUAL_LEVEL_TOLERANCE:
+            if (
+                difference
+                <= EQUAL_LEVEL_TOLERANCE
+            ):
+
                 group.append(
-                    (index_b, level_b)
+                    (
+                        index_b,
+                        level_b
+                    )
                 )
 
         if len(group) >= 2:
@@ -360,16 +451,16 @@ def _find_liquidity_sweep(
 
     candidates = []
 
-    # --------------------------------------------------------
-    # BUY-SIDE SETUP
-    # --------------------------------------------------------
+    # ========================================================
+    # BUY
+    # ========================================================
 
     if direction == "buy":
 
-        # Normal swing-low liquidity
         for index, level in swing_lows:
 
             if index >= start:
+
                 candidates.append(
                     (
                         index,
@@ -378,7 +469,6 @@ def _find_liquidity_sweep(
                     )
                 )
 
-        # Equal-low liquidity
         groups = _equal_low_groups(
             swing_lows
         )
@@ -404,7 +494,6 @@ def _find_liquidity_sweep(
                     )
                 )
 
-        # Check newest liquidity first
         candidates.sort(
             key=lambda x: x[0],
             reverse=True
@@ -420,6 +509,7 @@ def _find_liquidity_sweep(
                 liquidity_index
                 >= len(df) - 1
             ):
+
                 continue
 
             for candle in range(
@@ -435,8 +525,6 @@ def _find_liquidity_sweep(
                     df["close"].iloc[candle]
                 )
 
-                # Liquidity taken and price
-                # closes back above it.
                 if (
                     candle_low
                     < liquidity_level
@@ -451,16 +539,16 @@ def _find_liquidity_sweep(
                         "type": liquidity_type,
                     }
 
-    # --------------------------------------------------------
-    # SELL-SIDE SETUP
-    # --------------------------------------------------------
+    # ========================================================
+    # SELL
+    # ========================================================
 
     if direction == "sell":
 
-        # Normal swing-high liquidity
         for index, level in swing_highs:
 
             if index >= start:
+
                 candidates.append(
                     (
                         index,
@@ -469,7 +557,6 @@ def _find_liquidity_sweep(
                     )
                 )
 
-        # Equal-high liquidity
         groups = _equal_high_groups(
             swing_highs
         )
@@ -510,6 +597,7 @@ def _find_liquidity_sweep(
                 liquidity_index
                 >= len(df) - 1
             ):
+
                 continue
 
             for candle in range(
@@ -525,8 +613,6 @@ def _find_liquidity_sweep(
                     df["close"].iloc[candle]
                 )
 
-                # Liquidity taken and price
-                # closes back below it.
                 if (
                     candle_high
                     > liquidity_level
@@ -567,9 +653,9 @@ def _find_choch_bos(
     swing_highs = _swing_highs(df)
     swing_lows = _swing_lows(df)
 
-    # --------------------------------------------------------
-    # BUY STRUCTURAL CONFIRMATION
-    # --------------------------------------------------------
+    # ========================================================
+    # BUY
+    # ========================================================
 
     if direction == "buy":
 
@@ -603,9 +689,9 @@ def _find_choch_bos(
                     "type": "BOS/CHoCH",
                 }
 
-    # --------------------------------------------------------
-    # SELL STRUCTURAL CONFIRMATION
-    # --------------------------------------------------------
+    # ========================================================
+    # SELL
+    # ========================================================
 
     if direction == "sell":
 
@@ -642,6 +728,22 @@ def _find_choch_bos(
     return None
 
 
+def _calculate_pips(
+    price_distance
+):
+    """
+    Convert XAUUSD price movement to pips.
+
+    XAUUSD convention used by this engine:
+        0.01 price = 1 pip
+    """
+
+    return (
+        abs(price_distance)
+        / XAUUSD_PIP_SIZE
+    )
+
+
 def _build_trade(
     df,
     direction,
@@ -649,13 +751,14 @@ def _build_trade(
     confirmation
 ):
     """
-    Build entry, SL and TP.
+    Build entry, structural SL and 3R TP.
 
-    SL:
-        Beyond liquidity sweep.
+    v2.1:
+        SL remains beyond the liquidity sweep.
 
-    TP:
-        Minimum 3R.
+        The trade is rejected if the structural
+        risk is abnormally small compared with
+        current M15 ATR.
     """
 
     entry = float(
@@ -664,6 +767,10 @@ def _build_trade(
         ]
     )
 
+    # --------------------------------------------------------
+    # ATR
+    # --------------------------------------------------------
+
     atr_values = _atr(df)
 
     atr_value = atr_values.iloc[
@@ -671,13 +778,28 @@ def _build_trade(
     ]
 
     if pd.isna(atr_value):
-        atr_value = entry * 0.001
+
+        # Not enough ATR data.
+        # Do not manufacture a tiny fallback
+        # ATR because that could allow exactly
+        # the type of tiny stop we are trying
+        # to eliminate.
+
+        return None
 
     atr_value = float(
         atr_value
     )
 
+    # --------------------------------------------------------
+    # Structural buffer
+    # --------------------------------------------------------
+
     buffer = atr_value * 0.15
+
+    # --------------------------------------------------------
+    # BUY
+    # --------------------------------------------------------
 
     if direction == "buy":
 
@@ -691,10 +813,63 @@ def _build_trade(
         if risk <= 0:
             return None
 
+        minimum_risk = (
+            atr_value
+            * MIN_RISK_ATR_MULTIPLIER
+        )
+
+        if risk < minimum_risk:
+
+            print(
+                "RISK FILTER: REJECTED"
+            )
+
+            print(
+                "REASON: STOP TOO CLOSE"
+            )
+
+            print(
+                "ATR:",
+                round(
+                    atr_value,
+                    2
+                )
+            )
+
+            print(
+                "RISK DISTANCE:",
+                round(
+                    risk,
+                    2
+                )
+            )
+
+            print(
+                "MINIMUM RISK:",
+                round(
+                    minimum_risk,
+                    2
+                )
+            )
+
+            print(
+                "RISK IN PIPS:",
+                round(
+                    _calculate_pips(risk),
+                    1
+                )
+            )
+
+            return None
+
         tp = (
             entry
             + risk * MIN_RR
         )
+
+    # --------------------------------------------------------
+    # SELL
+    # --------------------------------------------------------
 
     else:
 
@@ -708,42 +883,135 @@ def _build_trade(
         if risk <= 0:
             return None
 
+        minimum_risk = (
+            atr_value
+            * MIN_RISK_ATR_MULTIPLIER
+        )
+
+        if risk < minimum_risk:
+
+            print(
+                "RISK FILTER: REJECTED"
+            )
+
+            print(
+                "REASON: STOP TOO CLOSE"
+            )
+
+            print(
+                "ATR:",
+                round(
+                    atr_value,
+                    2
+                )
+            )
+
+            print(
+                "RISK DISTANCE:",
+                round(
+                    risk,
+                    2
+                )
+            )
+
+            print(
+                "MINIMUM RISK:",
+                round(
+                    minimum_risk,
+                    2
+                )
+            )
+
+            print(
+                "RISK IN PIPS:",
+                round(
+                    _calculate_pips(risk),
+                    1
+                )
+            )
+
+            return None
+
         tp = (
             entry
             - risk * MIN_RR
         )
 
-    rr = abs(
-        tp - entry
-    ) / abs(
-        entry - sl
+    # --------------------------------------------------------
+    # RR
+    # --------------------------------------------------------
+
+    rr = (
+        abs(tp - entry)
+        /
+        abs(entry - sl)
     )
 
     if rr < MIN_RR:
         return None
 
+    # --------------------------------------------------------
+    # Pip calculations
+    # --------------------------------------------------------
+
+    risk_pips = _calculate_pips(
+        risk
+    )
+
+    reward_pips = _calculate_pips(
+        abs(tp - entry)
+    )
+
     return {
         "side": direction.upper(),
+
         "entry": round(
             entry,
             2
         ),
+
         "sl": round(
             sl,
             2
         ),
+
         "tp": round(
             tp,
             2
         ),
+
         "rr": round(
             rr,
+            2
+        ),
+
+        "risk_pips": round(
+            risk_pips,
+            1
+        ),
+
+        "reward_pips": round(
+            reward_pips,
+            1
+        ),
+
+        "atr": round(
+            atr_value,
+            2
+        ),
+
+        "risk_distance": round(
+            risk,
             2
         ),
     }
 
 
-def analyze(h4, h1, m15):
+def analyze(
+    h4,
+    h1,
+    m15
+):
     """
     Main APA analysis.
 
@@ -752,7 +1020,9 @@ def analyze(h4, h1, m15):
     1. H4/H1 directional framework
     2. M15 liquidity sweep
     3. M15 CHoCH/BOS
-    4. Minimum 1:3 RR
+    4. Structural SL
+    5. Minimum ATR-based risk
+    6. Minimum 1:3 RR
 
     No Telegram signal is returned unless
     every required condition passes.
@@ -762,9 +1032,17 @@ def analyze(h4, h1, m15):
     h1 = _prepare(h1)
     m15 = _prepare(m15)
 
-    print("================================")
-    print("ADVANCED APA ENGINE CHECK")
-    print("================================")
+    print(
+        "================================"
+    )
+
+    print(
+        "ADVANCED APA ENGINE v2.1 CHECK"
+    )
+
+    print(
+        "================================"
+    )
 
     print(
         "H4 candles:",
@@ -793,12 +1071,17 @@ def analyze(h4, h1, m15):
 
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
     # 1. ANALYSIS
-    # --------------------------------------------------------
+    # ========================================================
 
-    h4_bias = _structure_bias(h4)
-    h1_bias = _structure_bias(h1)
+    h4_bias = _structure_bias(
+        h4
+    )
+
+    h1_bias = _structure_bias(
+        h1
+    )
 
     print(
         "H4 BIAS:",
@@ -810,9 +1093,9 @@ def analyze(h4, h1, m15):
         h1_bias.upper()
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # 2. SELECT DIRECTION
-    # --------------------------------------------------------
+    # ========================================================
 
     direction = _select_direction(
         h4_bias,
@@ -873,9 +1156,9 @@ def analyze(h4, h1, m15):
             "HTF DIRECTION ALIGNED"
         )
 
-    # --------------------------------------------------------
-    # 3. LIQUIDITY / POI
-    # --------------------------------------------------------
+    # ========================================================
+    # 3. LIQUIDITY
+    # ========================================================
 
     sweep = _find_liquidity_sweep(
         m15,
@@ -925,9 +1208,9 @@ def analyze(h4, h1, m15):
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # 4. CHoCH / BOS
-    # --------------------------------------------------------
+    # ========================================================
 
     confirmation = _find_choch_bos(
         m15,
@@ -959,9 +1242,9 @@ def analyze(h4, h1, m15):
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # 5. RISK MANAGEMENT
-    # --------------------------------------------------------
+    # ========================================================
 
     trade = _build_trade(
         m15,
@@ -973,12 +1256,12 @@ def analyze(h4, h1, m15):
     if not trade:
 
         print(
-            "RISK/REWARD: FAILED"
+            "RISK MANAGEMENT: REJECTED"
         )
 
         print(
-            "MINIMUM REQUIRED RR:",
-            MIN_RR
+            "REASON: STRUCTURAL RISK "
+            "DID NOT MEET MINIMUM REQUIREMENT"
         )
 
         print(
@@ -986,6 +1269,26 @@ def analyze(h4, h1, m15):
         )
 
         return None
+
+    print(
+        "ATR:",
+        trade["atr"]
+    )
+
+    print(
+        "RISK DISTANCE:",
+        trade["risk_distance"]
+    )
+
+    print(
+        "RISK PIPS:",
+        trade["risk_pips"]
+    )
+
+    print(
+        "REWARD PIPS:",
+        trade["reward_pips"]
+    )
 
     print(
         "RISK/REWARD:",
@@ -1007,9 +1310,9 @@ def analyze(h4, h1, m15):
         trade["tp"]
     )
 
-    # --------------------------------------------------------
-    # 6. FINAL APA SIGNAL
-    # --------------------------------------------------------
+    # ========================================================
+    # 6. FINAL SIGNAL
+    # ========================================================
 
     trade["bias"] = (
         f"H4 {h4_bias.upper()} / "
@@ -1021,8 +1324,16 @@ def analyze(h4, h1, m15):
         "M15 CHoCH/BOS confirmation"
     )
 
-    print("================================")
-    print("RESULT: VALID APA SETUP")
-    print("================================")
+    print(
+        "================================"
+    )
+
+    print(
+        "RESULT: VALID APA SETUP"
+    )
+
+    print(
+        "================================"
+    )
 
     return trade
