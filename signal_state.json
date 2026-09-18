@@ -1,16 +1,13 @@
 {
-  "status": "SL_HIT",
-  "fingerprint": "BUY|4353.85|4349.58|4366.65",
-  "signal_time": "2026-09-18 10:45:00+00:00",
+  "status": "ACTIVE",
+  "fingerprint": "BUY|4355.22|4349.58|4372.14",
+  "signal_time": "2026-09-18 11:45:00+00:00",
   "side": "BUY",
-  "entry": 4353.85,
+  "entry": 4355.22,
   "sl": 4349.58,
-  "tp": 4366.65,
+  "tp": 4372.14,
   "rr": 3.0,
   "bias": "H4 NEUTRAL / H1 BULLISH",
   "reason": "SWING LOW liquidity sweep + M15 CHoCH/BOS confirmation",
-  "created_at": "2026-09-18T00:56:47.408699+00:00",
-  "closed_price": 4349.58,
-  "closed_time": "2026-09-18 11:41:00+00:00",
-  "closed_pips": -427.0
+  "created_at": "2026-09-18T01:53:08.500655+00:00"
 }
