@@ -1,5 +1,5 @@
 {
-  "status": "ACTIVE",
+  "status": "TP_HIT",
   "fingerprint": "SELL|4349.04|4366.62|4296.3",
   "signal_time": "2026-09-23 11:15:00+00:00",
   "side": "SELL",
@@ -9,5 +9,8 @@
   "rr": 3.0,
   "bias": "H4 BEARISH / H1 NEUTRAL",
   "reason": "EQUAL HIGHS liquidity sweep + M15 CHoCH/BOS confirmation",
-  "created_at": "2026-09-23T01:16:39.291334+00:00"
+  "created_at": "2026-09-23T01:16:39.291334+00:00",
+  "closed_price": 4296.3,
+  "closed_time": "2026-09-23 21:40:00+00:00",
+  "closed_pips": 5274.0
 }
