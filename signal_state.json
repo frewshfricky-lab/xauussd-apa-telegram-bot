@@ -1,16 +1,13 @@
 {
-  "status": "SL_HIT",
-  "fingerprint": "SELL|4279.09|4297.94|4222.54",
-  "signal_time": "2026-09-24 21:00:00+00:00",
-  "side": "SELL",
-  "entry": 4279.09,
-  "sl": 4297.94,
-  "tp": 4222.54,
+  "status": "ACTIVE",
+  "fingerprint": "BUY|4287.34|4285.14|4293.93",
+  "signal_time": "2026-09-28 11:00:00+00:00",
+  "side": "BUY",
+  "entry": 4287.34,
+  "sl": 4285.14,
+  "tp": 4293.93,
   "rr": 3.0,
-  "bias": "H4 BEARISH / H1 NEUTRAL",
-  "reason": "SWING HIGH liquidity sweep + M15 CHoCH/BOS confirmation",
-  "created_at": "2026-09-24T11:12:52.418951+00:00",
-  "closed_price": 4297.94,
-  "closed_time": "2026-09-25 20:06:00+00:00",
-  "closed_pips": -1885.0
+  "bias": "H4 NEUTRAL / H1 BULLISH",
+  "reason": "EQUAL LOWS liquidity sweep + M15 CHoCH/BOS confirmation",
+  "created_at": "2026-09-28T01:11:23.464123+00:00"
 }
