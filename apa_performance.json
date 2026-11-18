@@ -318,6 +318,17 @@
       "result": "TP_HIT",
       "pips": 7645.0,
       "fingerprint": "SELL|3880.75|3906.24|3804.3"
+    },
+    {
+      "closed_at": "2026-11-18 15:10:00+00:00",
+      "side": "SELL",
+      "entry": 3839.27,
+      "exit": 3781.69,
+      "sl": 3858.46,
+      "tp": 3781.69,
+      "result": "TP_HIT",
+      "pips": 5758.0,
+      "fingerprint": "SELL|3839.27|3858.46|3781.69"
     }
   ]
 }
